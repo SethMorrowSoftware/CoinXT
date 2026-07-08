@@ -593,3 +593,35 @@ whole offline-signing chain and lets a restore be checked against another wallet
 - Honest status: same as phase 5 - headless-verified and vector-locked everywhere Python can
   reach; the new script paths NEED AN ON-ENGINE PASS (`testRlp` / `testEthTx` / the extended
   `testRestore` are the checklist).
+
+**Phase 5c - offline Bitcoin transactions (BIP-143) and the paste-your-own round (2026-07-08).**
+Still pure script: no native change, ABI 3, binaries untouched. Two goals: sign a REAL Bitcoin
+transaction offline, and let a user bring their own test material to every tab.
+
+- New public API: `cxSigToDer` (strict BIP-66 DER from the raw 64-byte r||s; trims leading zeros,
+  0x00-pads a set high bit), `cxAddressToScript` (scriptPubKey for ANY decodable address - P2PKH,
+  P2SH, every witness version, both networks; the underlying checksum verification means a typo'd
+  DESTINATION yields an error, never a spendable-looking script), and `cxBtcTxSignP2WPKH` (one
+  P2WPKH or BIP-49 nested input, any standard outputs, BIP-143 SIGHASH_ALL, RFC 6979, witness
+  serialization; returns txid & sighash & raw tx; fails closed on every malformed field AND on
+  outputs exceeding the input - a negative fee can only be a mistake). This is the tx-building
+  LAYER rule 3 anticipated: the caller shows fields + fee to a human; the library only encodes,
+  hashes, signs.
+- **The BIP-143 anchor:** the official P2SH-P2WPKH example in the BIP (every intermediate printed:
+  hashPrevouts/hashSequence/hashOutputs, preimage, sighash, DER signature, final tx) is reproduced
+  BYTE FOR BYTE through the shim - the deterministic RFC 6979 signature IS the published one, the
+  same lucky-but-checkable fact as EIP-155. Locked in coin-kat (`run_btc_tx_checks`, with mirrors
+  of all three functions and constructed DER padding/trimming edges plus a python-ecdsa DER parse
+  cross-check when available), on-engine (`testBtcTx`), and the demo self-test. The example values
+  were fetched from the BIP text itself, not memory (bips.dev 403'd; the raw GitHub mirror served
+  it).
+- **The demo is now eleven tabs.** New BTC Tx tab: funding outpoint / outputs / version-sequence-
+  locktime fields, a native-vs-nested toggle, the fee always computed on screen, and a one-click
+  "Load the BIP-143 example" preset (adopts the example's published key) so Sign visibly reproduces
+  the BIP's raw bytes. Paste-your-own everywhere else: Keys imports a WIF or raw-hex key; Wallet
+  gained a derivation-path explorer (any typed path -> all five address forms + pubkey + WIF +
+  xprv/xpub); Sign verifies a PASTED pubkey + signature against the message (sign here, verify in
+  python-ecdsa, or the reverse); ECDH combines YOUR key with a pasted peer pubkey; Hashes accepts
+  0x-prefixed raw hex.
+- Honest status: headless-verified and vector-locked everywhere Python can reach; the new script
+  paths NEED AN ON-ENGINE PASS (`testBtcTx` + the new demo flows are the checklist).

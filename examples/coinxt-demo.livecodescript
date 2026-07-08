@@ -14,10 +14,13 @@
 -- Tabs: Keys (make + validate a secp256k1 key, derive its public key + WIF),
 -- Addresses (Bitcoin legacy + nested SegWit + SegWit + Taproot, Ethereum with
 -- EIP-55, mainnet/testnet toggle), Sign & Verify (deterministic RFC 6979
--- ECDSA + tamper rejection), Schnorr (BIP-340 sign/verify/tamper + the
--- BIP-341 Taproot tweak), Ethereum (EIP-191 personal_sign + ecrecover to the
--- signer's ADDRESS, plus a COMPLETE offline EIP-155 transaction: RLP ->
--- keccak -> sign -> raw broadcast bytes), Shared Secret (ECDH), Hashes (the
+-- ECDSA + tamper rejection + verify-a-pasted-signature), Schnorr (BIP-340
+-- sign/verify/tamper + the BIP-341 Taproot tweak), Ethereum (EIP-191
+-- personal_sign + ecrecover to the signer's ADDRESS, plus a COMPLETE offline
+-- EIP-155 transaction: RLP -> keccak -> sign -> raw broadcast bytes), BTC Tx
+-- (a COMPLETE offline BIP-143 SegWit spend - native or nested - that
+-- reproduces the official BIP-143 example byte for byte, fee always shown),
+-- Shared Secret (ECDH, including your-key x pasted-pubkey), Hashes (the
 -- Keccak-256 vs SHA3-256 footgun, plus SHA-2, RIPEMD-160, hash160/hash256,
 -- HMAC), Wallet (type/paste ANY BIP-39 phrase to RESTORE it, or generate
 -- 12/24 fresh words: the first BIP-44/49/84/86 + Ethereum addresses, the
@@ -72,7 +75,7 @@ constant kClrPillBad = "247,216,216"     -- ABI pill: not loaded
 constant kClrPillBadText = "150,42,42"
 
 -- ------------------------------------------------------------------ state
-local sTab            -- active tab: keys | addr | sign | schn | eth | ecdh | hash | seed | dec | about
+local sTab            -- active tab: keys | addr | sign | schn | eth | btx | ecdh | hash | seed | dec | about
 local sSeckey         -- the demo seckey (PUBLIC test key material only)
 local sPub33          -- its compressed pubkey
 local sPub65          -- its uncompressed pubkey
@@ -83,6 +86,7 @@ local sSchnMsg        -- the message signed on the Schnorr tab
 local sEthSig         -- last recoverable signature (65 bytes)
 local sEthMsg         -- the message signed on the Ethereum tab
 local sTestnet        -- true when the Addresses tab shows testnet forms
+local sBtxNested      -- true when the BTC Tx input is nested P2SH-P2WPKH
 local sAddrP2WPKH     -- last derived SegWit address (for the copy button)
 local sAddrEth        -- last derived Ethereum address (for the copy button)
 local sTPass          -- embedded self-test: passing checks
@@ -379,18 +383,19 @@ on buildUI
    set the textAlign of field "ui:pillText" to "center"
    refreshAbiPill
 
-   -- tab bar (ten tabs; short labels so the row fits the 900px window,
+   -- tab bar (eleven tabs; short labels so the row fits the 900px window,
    -- while each panel header spells the capability out in full)
-   cxdButton "ui:tabKeys", "24,84,106,114", "Keys", "idle"
-   cxdButton "ui:tabAddr", "109,84,191,114", "Addr", "idle"
-   cxdButton "ui:tabSign", "194,84,276,114", "Sign", "idle"
-   cxdButton "ui:tabSchn", "279,84,361,114", "Schnorr", "idle"
-   cxdButton "ui:tabEth", "364,84,446,114", "ETH", "idle"
-   cxdButton "ui:tabEcdh", "449,84,531,114", "ECDH", "idle"
-   cxdButton "ui:tabHash", "534,84,616,114", "Hash", "idle"
-   cxdButton "ui:tabSeed", "619,84,701,114", "Wallet", "idle"
-   cxdButton "ui:tabDec", "704,84,786,114", "Decode", "idle"
-   cxdButton "ui:tabAbout", "789,84,871,114", "About", "idle"
+   cxdButton "ui:tabKeys", "24,84,98,114", "Keys", "idle"
+   cxdButton "ui:tabAddr", "101,84,175,114", "Addr", "idle"
+   cxdButton "ui:tabSign", "178,84,252,114", "Sign", "idle"
+   cxdButton "ui:tabSchn", "255,84,329,114", "Schnorr", "idle"
+   cxdButton "ui:tabEth", "332,84,406,114", "ETH", "idle"
+   cxdButton "ui:tabBtx", "409,84,483,114", "BTC Tx", "idle"
+   cxdButton "ui:tabEcdh", "486,84,560,114", "ECDH", "idle"
+   cxdButton "ui:tabHash", "563,84,637,114", "Hash", "idle"
+   cxdButton "ui:tabSeed", "640,84,714,114", "Wallet", "idle"
+   cxdButton "ui:tabDec", "717,84,791,114", "Decode", "idle"
+   cxdButton "ui:tabAbout", "794,84,868,114", "About", "idle"
 
    -- content panel + footer
    cxdPanel "ui:panel", "24,124,876,652"
@@ -401,6 +406,7 @@ on buildUI
    buildSignTab
    buildSchnorrTab
    buildEthTab
+   buildBtxTab
    buildEcdhTab
    buildHashTab
    buildSeedTab
@@ -446,7 +452,10 @@ on buildKeysTab
    cxdButton "keys:copy", "480,222,600,252", "Copy pubkey", "idle"
    cxdCap "keys:outLabel", "48,266,852,286", "seckey (PUBLIC) / compressed + uncompressed pubkey / x-only (BIP-340) / WIF export:", kClrInkMute
    cxdMono "keys:out", "48,288,852,452"
-   cxdCap "keys:note", "48,462,852,502", "The compressed pubkey feeds the Bitcoin addresses; the uncompressed one (minus its 04 byte) feeds an Ethereum address. The WIF line is the same secret key in the form every wallet imports. Open the Addresses tab to see all five address forms.", kClrInkMute
+   cxdCap "keys:note", "48,462,852,500", "The compressed pubkey feeds the Bitcoin addresses; the uncompressed one (minus its 04 byte) feeds an Ethereum address. The WIF line is the same secret key in the form every wallet imports. Open the Addresses tab to see all five address forms.", kClrInkMute
+   cxdCap "keys:importLabel", "48,506,852,524", "Or import YOUR OWN test key - paste a WIF string or 64 hex characters (test keys only!):", kClrInkMute
+   cxdInput "keys:import", "48,526,660,556", ""
+   cxdButton "keys:load", "672,526,852,556", "Import key", "primary"
    cxdLabel "keys:status", "48,566,852,600", "No key yet - click a button above.", kClrInkSoft, 12, "plain"
 end buildKeysTab
 
@@ -478,6 +487,10 @@ on buildSignTab
    cxdInput "sign:msg", "48,288,852,320", "Pay Bob 1 coin, invoice 42"
    cxdCap "sign:outLabel", "48,330,852,350", "digest (SHA-256) / signature (r||s, low-s):", kClrInkMute
    cxdMono "sign:out", "48,352,852,452"
+   cxdCap "sign:vLabel", "48,460,852,478", "Or verify a PASTED signature against the message above - pubkey hex / signature hex (r||s):", kClrInkMute
+   cxdInput "sign:vpub", "48,480,420,510", ""
+   cxdInput "sign:vsig", "432,480,740,510", ""
+   cxdButton "sign:vgo", "752,480,852,510", "Check", "idle"
    cxdLabel "sign:status", "48,566,852,600", "Make a key on the Keys tab, then Sign here.", kClrInkSoft, 12, "plain"
 end buildSignTab
 
@@ -515,6 +528,27 @@ on buildEthTab
    cxdLabel "eth:status", "48,566,852,600", "Make a key on the Keys tab first.", kClrInkSoft, 12, "plain"
 end buildEthTab
 
+-- ---- BTC Tx tab (offline BIP-143 signing)
+on buildBtxTab
+   cxdHdr "btx:h", "48,138,852,166", "Sign a real Bitcoin transaction, offline (BIP-143)"
+   cxdCap "btx:p", "48,168,852,216", "One SegWit input owned by YOUR current key (Keys tab), any standard outputs: the fields are BIP-143 hashed, signed deterministically, DER-framed, and assembled into broadcast-ready raw bytes - all offline. Whatever the outputs do not spend becomes the fee, shown before you sign. The prefill is the OFFICIAL BIP-143 example: click Load, then Sign, and the raw bytes must equal the transaction printed in the BIP itself.", kClrInkSoft
+   cxdButton "btx:example", "48,224,268,254", "Load the BIP-143 example", "idle"
+   cxdButton "btx:nested", "280,224,500,254", "Input: nested (BIP-49)", "idle"
+   cxdButton "btx:go", "690,224,852,254", "Sign transaction", "primary"
+   cxdCap "btx:inLabel", "48,262,852,280", "Funding outpoint - txid / vout / amount in satoshis (the coin your key controls):", kClrInkMute
+   cxdInput "btx:txid", "48,282,540,312", "77541aeb3c4dac9260b68f74f44c973081a9d4cb2ebe8038b2d70faa201b6bdb"
+   cxdInput "btx:vout", "552,282,620,312", "1"
+   cxdInput "btx:amt", "632,282,852,312", "1000000000"
+   cxdCap "btx:outLabel", "48,320,852,338", "Outputs, one per line: amountSats address (any address type; the unspent rest is the fee):", kClrInkMute
+   cxdInput "btx:outs", "48,340,852,398", "199996600 1Fyxts6r24DpEieygQiNnWxUdb18ANa5p7" & return & "800000000 1Q5YjKVj5yQWHBBsyEBamkfph3cA6G9KK8"
+   cxdCap "btx:advLabel", "48,406,852,424", "version / sequence / locktime:", kClrInkMute
+   cxdInput "btx:ver", "48,426,140,456", "1"
+   cxdInput "btx:seq", "152,426,320,456", "4294967294"
+   cxdInput "btx:lock", "332,426,480,456", "1170"
+   cxdMono "btx:out", "48,464,852,556"
+   cxdLabel "btx:status", "48,566,852,626", "Load the example (it also adopts the example's PUBLIC key), or fill in your own test coin. Nothing is broadcast; the output is raw bytes you can inspect in any tx decoder.", kClrInkSoft, 12, "plain"
+end buildBtxTab
+
 -- ---- Shared Secret (ECDH) tab
 on buildEcdhTab
    cxdHdr "ecdh:h", "48,138,852,166", "Two parties, one shared secret (ECDH)"
@@ -522,6 +556,9 @@ on buildEcdhTab
    cxdButton "ecdh:go", "48,230,300,260", "Run the exchange (test keys)", "primary"
    cxdCap "ecdh:outLabel", "48,274,852,294", "Alice's view (sk_A, pub_B) / Bob's view (sk_B, pub_A):", kClrInkMute
    cxdMono "ecdh:out", "48,296,852,452"
+   cxdCap "ecdh:peerLabel", "48,462,852,480", "Or combine YOUR key (Keys tab) with a pasted peer public key (33/65-byte hex):", kClrInkMute
+   cxdInput "ecdh:peer", "48,482,620,512", ""
+   cxdButton "ecdh:mine", "632,482,852,512", "Secret with MY key", "primary"
    cxdLabel "ecdh:status", "48,566,852,600", "Click above to run a Diffie-Hellman exchange between two demo keys.", kClrInkSoft, 12, "plain"
 end buildEcdhTab
 
@@ -529,7 +566,7 @@ end buildEcdhTab
 on buildHashTab
    cxdHdr "hash:h", "48,138,852,166", "The coin hashes, including the classic Ethereum footgun"
    cxdCap "hash:p", "48,168,852,214", "Ethereum's Keccak-256 and NIST's SHA3-256 differ by ONE padding byte, and confusing them is the classic wallet bug. CoinXT exposes them as two functions that can never be aliased. Hash any text and compare.", kClrInkSoft
-   cxdCap "hash:msgLabel", "48,224,852,244", "Text to hash:", kClrInkMute
+   cxdCap "hash:msgLabel", "48,224,852,244", "Text to hash (or 0x... to hash raw hex bytes, so you can check vectors from any tool):", kClrInkMute
    cxdInput "hash:msg", "48,246,700,278", "abc"
    cxdButton "hash:go", "712,246,852,278", "Hash it", "primary"
    cxdMono "hash:out", "48,290,852,452"
@@ -547,8 +584,10 @@ on buildSeedTab
    cxdInput "seed:pp", "664,232,852,262", ""
    cxdCap "seed:mnemLabel", "48,272,852,292", "Seed phrase (12/15/18/21/24 words; PUBLIC demo phrases only - never type a funded one here):", kClrInkMute
    cxdInput "seed:mnem", "48,294,852,348", "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-   cxdCap "seed:outLabel", "48,356,852,376", "checksum / master seed / first receiving address per account type / account xpub / WIF:", kClrInkMute
-   cxdMono "seed:out", "48,378,852,556"
+   cxdCap "seed:pathLabel", "48,362,180,380", "Explore a path:", kClrInkMute
+   cxdInput "seed:path", "184,356,560,386", "m/84'/0'/0'/0/0"
+   cxdButton "seed:derive", "572,356,740,386", "Derive this path", "idle"
+   cxdMono "seed:out", "48,394,852,556"
    cxdLabel "seed:status", "48,566,852,626", "Click Restore to rebuild the canonical test wallet, or Generate for a fresh phrase (SodiumXT entropy if loaded, else a fixed DEMO value).", kClrInkSoft, 12, "plain"
 end buildSeedTab
 
@@ -567,7 +606,7 @@ end buildDecodeTab
 -- ---- About tab (pitch + embedded self-test)
 on buildAboutTab
    cxdHdr "about:h", "48,138,852,166", "CoinXT: Bitcoin and Ethereum primitives for xTalk"
-   cxdCap "about:exp", "48,168,852,300", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign a COMPLETE offline EIP-155 Ethereum transaction (RLP is script-side and vector-locked), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
+   cxdCap "about:exp", "48,168,852,300", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
    cxdButton "about:selftest", "48,306,300,338", "Run the full self-test", "primary"
    cxdMono "about:out", "48,350,852,452"
    cxdLabel "about:status", "48,566,852,600", "Click Run the full self-test to check every primitive against a public vector.", kClrInkSoft, 12, "plain"
@@ -598,6 +637,7 @@ on restyleTabs
    styleTab "ui:tabSign", (sTab is "sign")
    styleTab "ui:tabSchn", (sTab is "schn")
    styleTab "ui:tabEth", (sTab is "eth")
+   styleTab "ui:tabBtx", (sTab is "btx")
    styleTab "ui:tabEcdh", (sTab is "ecdh")
    styleTab "ui:tabHash", (sTab is "hash")
    styleTab "ui:tabSeed", (sTab is "seed")
@@ -637,6 +677,8 @@ on mouseUp
       handleSchnorr tRole
    else if tPrefix is "eth" then
       handleEth tRole
+   else if tPrefix is "btx" then
+      handleBtx tRole
    else if tPrefix is "ecdh" then
       handleEcdh tRole
    else if tPrefix is "hash" then
@@ -661,6 +703,8 @@ on handleChrome pRole
       showTab "schn"
    else if pRole is "tabEth" then
       showTab "eth"
+   else if pRole is "tabBtx" then
+      showTab "btx"
    else if pRole is "tabEcdh" then
       showTab "ecdh"
    else if pRole is "tabHash" then
@@ -680,10 +724,45 @@ on handleKeys pRole
       doDemoKey
    else if pRole is "sodium" then
       doSodiumKey
+   else if pRole is "load" then
+      doImportKey
    else if pRole is "copy" then
       doCopyPubkey
    end if
 end handleKeys
+
+-- paste-your-own: accept a 64-hex-char raw seckey or any WIF string; both
+-- paths validate range/checksum and fail closed before anything is adopted
+on doImportKey
+   local tIn
+   local tKey
+   local tDecoded
+   put word 1 to -1 of field "keys:import" into tIn
+   if tIn is empty then
+      cxdStatus "keys:status", "Paste a WIF string or 64 hex characters first.", "bad"
+      exit doImportKey
+   end if
+   if the number of chars in tIn is 64 then
+      put cxHexDecode(tIn) into tKey
+      if cxIsError(tKey) then
+         cxdStatus "keys:status", tKey, "bad"
+         exit doImportKey
+      end if
+      adoptSeckey tKey, "Imported from raw hex. Treat every key typed into a demo as compromised."
+      put empty into tKey
+      exit doImportKey
+   end if
+   put cxWifDecode(tIn) into tDecoded
+   if cxIsError(tDecoded) then
+      cxdStatus "keys:status", tDecoded, "bad"
+      exit doImportKey
+   end if
+   put line 3 to -1 of tDecoded into tKey
+   adoptSeckey tKey, "Imported from WIF (" & line 1 of tDecoded & "," && \
+      "compressed=" & line 2 of tDecoded & "). Treat every key typed into a demo as compromised."
+   put empty into tKey
+   put empty into tDecoded
+end doImportKey
 
 on doDemoKey
    adoptSeckey cxSha256(cxdAscii("correct horse battery staple")), \
@@ -818,8 +897,35 @@ on handleSign pRole
       doVerify
    else if pRole is "tamper" then
       doTamper
+   else if pRole is "vgo" then
+      doVerifyPasted
    end if
 end handleSign
+
+-- third-party verification: paste any pubkey + raw signature and check them
+-- against SHA-256 of the message field. Sign here and verify in another
+-- library, or the reverse - that is what makes the demo a test bench.
+on doVerifyPasted
+   local tPub
+   local tSig
+   local tHash
+   put cxHexDecode(word 1 to -1 of field "sign:vpub") into tPub
+   put cxHexDecode(word 1 to -1 of field "sign:vsig") into tSig
+   if cxIsError(tPub) or (the number of bytes in tPub is not 33 and the number of bytes in tPub is not 65) then
+      cxdStatus "sign:status", "The pubkey must be 33 or 65 bytes of hex (66 or 130 characters).", "bad"
+      exit doVerifyPasted
+   end if
+   if cxIsError(tSig) or the number of bytes in tSig is not 64 then
+      cxdStatus "sign:status", "The signature must be the raw 64-byte r||s form (128 hex characters).", "bad"
+      exit doVerifyPasted
+   end if
+   put cxSha256(cxdAscii(field "sign:msg")) into tHash
+   if cxVerify(tPub, tHash, tSig) is true then
+      cxdStatus "sign:status", "The pasted signature VERIFIES for this message under that pubkey.", "ok"
+   else
+      cxdStatus "sign:status", "Does NOT verify: wrong key, wrong message, or a corrupt signature (fail closed).", "bad"
+   end if
+end doVerifyPasted
 
 function haveKey pStatusField
    if sSeckey is empty then
@@ -1085,12 +1191,117 @@ on doTxSign
    cxdStatus "eth:status", "A broadcast-shaped signed transaction, built entirely offline. NEVER broadcast a demo key's transaction.", "ok"
 end doTxSign
 
+-- ------------------------------------------------------------------ BTC Tx tab actions
+on handleBtx pRole
+   if pRole is "go" then
+      doBtxSign
+   else if pRole is "example" then
+      doBtxExample
+   else if pRole is "nested" then
+      doBtxToggle
+   end if
+end handleBtx
+
+on doBtxToggle
+   put (sBtxNested is not true) into sBtxNested
+   if sBtxNested then
+      set the label of button "btx:nested" to "Input: nested (BIP-49)"
+   else
+      set the label of button "btx:nested" to "Input: native (bc1q)"
+   end if
+end doBtxToggle
+
+-- load every field of the OFFICIAL BIP-143 P2SH-P2WPKH example, including
+-- its (published, PUBLIC) key, so Sign reproduces the BIP's raw tx exactly
+on doBtxExample
+   put true into sBtxNested
+   set the label of button "btx:nested" to "Input: nested (BIP-49)"
+   put "77541aeb3c4dac9260b68f74f44c973081a9d4cb2ebe8038b2d70faa201b6bdb" into field "btx:txid"
+   put 1 into field "btx:vout"
+   put 1000000000 into field "btx:amt"
+   put "199996600 1Fyxts6r24DpEieygQiNnWxUdb18ANa5p7" & return & \
+      "800000000 1Q5YjKVj5yQWHBBsyEBamkfph3cA6G9KK8" into field "btx:outs"
+   put 1 into field "btx:ver"
+   put 4294967294 into field "btx:seq"
+   put 1170 into field "btx:lock"
+   adoptSeckey cxdBin("eb696a065ef48a2192da5b28b694f87544b30fae8327c4510137a922f32c6dcf"), \
+      "BIP-143 example key adopted (PUBLIC - printed in the BIP; never fund it)."
+   cxdStatus "btx:status", "Official example loaded (key included). Sign now: the raw bytes must equal the transaction printed in BIP-143.", "ok"
+end doBtxExample
+
+-- the confirm-before-sign flow: parse the on-screen fields, show the fee,
+-- and let the library fail closed on anything malformed
+on doBtxSign
+   local tOuts
+   local tLine
+   local tTotal
+   local tFee
+   local tRes
+   local tOut
+   if haveKey("btx:status") is false then
+      exit doBtxSign
+   end if
+   -- total the outputs here so the FEE is on screen next to the result
+   put 0 into tTotal
+   repeat for each line tLine in field "btx:outs"
+      if tLine is empty then
+         next repeat
+      end if
+      if word 1 of tLine is not an integer then
+         cxdStatus "btx:status", "Each output line is: amountSats address", "bad"
+         exit doBtxSign
+      end if
+      add word 1 of tLine to tTotal
+   end repeat
+   put cxBtcTxSignP2WPKH(sSeckey, word 1 to -1 of field "btx:txid", \
+      word 1 to -1 of field "btx:vout", word 1 to -1 of field "btx:amt", \
+      field "btx:outs", sBtxNested is true, word 1 to -1 of field "btx:ver", \
+      word 1 to -1 of field "btx:seq", word 1 to -1 of field "btx:lock") into tRes
+   if cxIsError(tRes) then
+      put tRes into field "btx:out"
+      cxdStatus "btx:status", "Refused to sign (fail closed) - fix the field the error names.", "bad"
+      exit doBtxSign
+   end if
+   put (word 1 to -1 of field "btx:amt") - tTotal into tFee
+   put "txid     " & line 1 of tRes & return into tOut
+   put "sighash  " & line 2 of tRes && "(BIP-143, SIGHASH_ALL)" & return after tOut
+   put "fee      " & tFee && "sats (input minus outputs - always review this)" & return after tOut
+   put "raw tx   " & cxHexEncode(line 3 to -1 of tRes) after tOut
+   put tOut into field "btx:out"
+   cxdStatus "btx:status", "Signed offline: paste the raw tx into any decoder to inspect it. NEVER broadcast a demo transaction.", "ok"
+end doBtxSign
+
 -- ------------------------------------------------------------------ ECDH tab actions
 on handleEcdh pRole
    if pRole is "go" then
       doEcdh
+   else if pRole is "mine" then
+      doEcdhMine
    end if
 end handleEcdh
+
+-- the paste-your-own flow: YOUR key (Keys tab) x a pasted peer pubkey
+on doEcdhMine
+   local tPeerHex
+   local tPeer
+   local tShared
+   if haveKey("ecdh:status") is false then
+      exit doEcdhMine
+   end if
+   put word 1 to -1 of field "ecdh:peer" into tPeerHex
+   put cxHexDecode(tPeerHex) into tPeer
+   if cxIsError(tPeer) or (the number of bytes in tPeer is not 33 and the number of bytes in tPeer is not 65) then
+      cxdStatus "ecdh:status", "Paste a 33- or 65-byte public key as hex (66 or 130 characters).", "bad"
+      exit doEcdhMine
+   end if
+   put cxEcdh(sSeckey, tPeer) into tShared
+   if cxIsError(tShared) then
+      cxdStatus "ecdh:status", tShared, "bad"
+      exit doEcdhMine
+   end if
+   put "my key x pasted pubkey:" & return & "shared  " & cxdHex(tShared) into field "ecdh:out"
+   cxdStatus "ecdh:status", "The peer computes the SAME 32 bytes from THEIR key and YOUR pubkey (Keys tab, Copy pubkey).", "ok"
+end doEcdhMine
 
 on doEcdh
    local tAliceSk
@@ -1134,7 +1345,17 @@ end handleHash
 on doHashAll
    local tIn
    local tOut
-   put cxdAscii(field "hash:msg") into tIn
+   -- a 0x prefix means "hash these raw BYTES", so vectors from other tools
+   -- can be checked exactly; anything else is hashed as UTF-8 text
+   if char 1 to 2 of field "hash:msg" is "0x" then
+      put cxHexDecode(char 3 to -1 of word 1 to -1 of field "hash:msg") into tIn
+      if cxIsError(tIn) then
+         cxdStatus "hash:status", "Not valid hex after the 0x prefix.", "bad"
+         exit doHashAll
+      end if
+   else
+      put cxdAscii(field "hash:msg") into tIn
+   end if
    put "keccak256  " & cxdHex(cxKeccak256(tIn)) & return into tOut
    put "sha3-256   " & cxdHex(cxSha3_256(tIn)) & return after tOut
    put "           ^ same input, ONE padding byte apart: never alias these two" & return after tOut
@@ -1157,8 +1378,60 @@ on handleSeed pRole
       doGenerate 16
    else if pRole is "gen24" then
       doGenerate 32
+   else if pRole is "derive" then
+      doDerivePath
    end if
 end handleSeed
+
+-- the path explorer: derive ANY typed path from the phrase above and show
+-- everything that node is - every address form, the pubkey, WIF, xprv/xpub.
+-- Rederives from the phrase each click, so no master node lingers in state.
+on doDerivePath
+   local tMnem
+   local tPath
+   local tSeed
+   local tMaster
+   local tNode
+   local tKey
+   local tPub
+   local tOut
+   put word 1 to -1 of field "seed:mnem" into tMnem
+   if cxMnemonicValidate(tMnem) is false then
+      cxdStatus "seed:status", "Fix the seed phrase first (its checksum does not validate).", "bad"
+      exit doDerivePath
+   end if
+   put word 1 to -1 of field "seed:path" into tPath
+   put cxMnemonicToSeed(tMnem, field "seed:pp") into tSeed
+   put cxHdFromSeed(tSeed) into tMaster
+   put empty into tSeed
+   if cxIsError(tMaster) then
+      cxdStatus "seed:status", tMaster, "bad"
+      exit doDerivePath
+   end if
+   put cxHdDerivePath(tMaster, tPath) into tNode
+   put empty into tMaster
+   if cxIsError(tNode) then
+      put tNode into field "seed:out"
+      cxdStatus "seed:status", "Bad path: use m/44'/0'/0'/0/0 shapes (' or h marks a hardened step).", "bad"
+      exit doDerivePath
+   end if
+   put cxHdPubkey(tNode) into tPub
+   put "path       " & tPath & return & return into tOut
+   put "legacy     " & cxBtcAddressP2PKH(tPub, true) & return after tOut
+   put "nested     " & cxBtcAddressP2SH_P2WPKH(tPub, true) & return after tOut
+   put "segwit     " & cxBtcAddressP2WPKH(tPub, true) & return after tOut
+   put "taproot    " & cxBtcAddressP2TR(tPub, true) & return after tOut
+   put "ethereum   " & cxEthAddress(tPub) & return & return after tOut
+   put "pubkey     " & cxdHex(tPub) & return after tOut
+   put cxHdSeckey(tNode) into tKey
+   put "wif        " & cxWifEncode(tKey, true, true) && "(SECRET in real life)" & return after tOut
+   put empty into tKey
+   put "xprv       " & cxXprv(tNode, true) & return after tOut
+   put "xpub       " & cxXpub(tNode, true) after tOut
+   put empty into tNode
+   put tOut into field "seed:out"
+   cxdStatus "seed:status", "One node, every identity it has. Compare any line against another wallet's export.", "ok"
+end doDerivePath
 
 -- make a fresh phrase (12 words from 16 entropy bytes, 24 from 32), put it
 -- in the phrase field, and run the SAME restore path a typed phrase takes
@@ -1694,6 +1967,19 @@ on doSelfTest
    checkInto (cxHexEncode(tRaw) is \
       "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83"), \
       "the official EIP-155 example transaction is reproduced byte for byte"
+
+   -- the official BIP-143 P2SH-P2WPKH example transaction, byte for byte
+   put cxBtcTxSignP2WPKH(cxdBin("eb696a065ef48a2192da5b28b694f87544b30fae8327c4510137a922f32c6dcf"), \
+      "77541aeb3c4dac9260b68f74f44c973081a9d4cb2ebe8038b2d70faa201b6bdb", 1, 1000000000, \
+      "199996600 1Fyxts6r24DpEieygQiNnWxUdb18ANa5p7" & return & "800000000 1Q5YjKVj5yQWHBBsyEBamkfph3cA6G9KK8", \
+      true, 1, 4294967294, 1170) into tDecoded
+   if cxIsError(tDecoded) then
+      checkInto false, "the official BIP-143 example transaction is reproduced byte for byte"
+   else
+      checkInto (cxHexEncode(line 3 to -1 of tDecoded) is \
+         "01000000000101db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a5477010000001716001479091972186c449eb1ded22b78e40d009bdf0089feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac02473044022047ac8e878352d3ebbde1c94ce3a10d057c24175747116f8288e5d794d12d482f0220217f36a485cae903c713331d877c1f64677e3622ad4010726870540656fe9dcb012103ad1d8e89212f0b92c74d23bb710c00662ad1470198ac48c43f7d6f93a2a2687392040000"), \
+         "the official BIP-143 example transaction is reproduced byte for byte"
+   end if
 
    put sTLog into field "about:out"
    if sTFail is 0 then

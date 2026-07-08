@@ -1314,6 +1314,180 @@ def run_rlp_eip155_checks(lib, kat):
 
 
 # ---------------------------------------------------------------------------
+# Bitcoin transaction signing (BIP-143 P2WPKH / P2SH-P2WPKH) plus its two
+# building blocks, strict-DER signatures and address->scriptPubKey. The
+# mirrors below are 1:1 with cxSigToDer / cxAddressToScript /
+# cxBtcTxSignP2WPKH, and the anchor is the OFFICIAL BIP-143 P2SH-P2WPKH
+# example: one input, two outputs, every intermediate value published in the
+# BIP (hashPrevouts, hashSequence, hashOutputs, the preimage, the sighash,
+# the DER signature, the final tx). The shim's deterministic RFC 6979
+# signature IS the published one, so the whole chain pins byte for byte.
+BIP143_KEY = bytes.fromhex(
+    "eb696a065ef48a2192da5b28b694f87544b30fae8327c4510137a922f32c6dcf")
+BIP143_PUB = "03ad1d8e89212f0b92c74d23bb710c00662ad1470198ac48c43f7d6f93a2a26873"
+# the funding txid as displayed (big-endian; the outpoint serializes reversed)
+BIP143_TXID = "77541aeb3c4dac9260b68f74f44c973081a9d4cb2ebe8038b2d70faa201b6bdb"
+BIP143_VOUT = 1
+BIP143_AMOUNT = 1000000000
+# the two published outputs, as the demo/API takes them: "amount address"
+# (the addresses are the P2PKH form of the published output h160s)
+BIP143_OUT1 = (199996600, "1Fyxts6r24DpEieygQiNnWxUdb18ANa5p7")
+BIP143_OUT2 = (800000000, "1Q5YjKVj5yQWHBBsyEBamkfph3cA6G9KK8")
+BIP143_VERSION, BIP143_SEQUENCE, BIP143_LOCKTIME = 1, 0xFFFFFFFE, 1170
+BIP143_SIGHASH = \
+    "64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6"
+BIP143_DER = ("3044022047ac8e878352d3ebbde1c94ce3a10d057c24175747116f8288e5d7"
+              "94d12d482f0220217f36a485cae903c713331d877c1f64677e3622ad401072"
+              "6870540656fe9dcb")
+BIP143_RAW = (
+    "01000000000101db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb"
+    "1a5477010000001716001479091972186c449eb1ded22b78e40d009bdf0089feffffff02"
+    "b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008"
+    "af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac02473044"
+    "022047ac8e878352d3ebbde1c94ce3a10d057c24175747116f8288e5d794d12d482f0220"
+    "217f36a485cae903c713331d877c1f64677e3622ad4010726870540656fe9dcb012103ad"
+    "1d8e89212f0b92c74d23bb710c00662ad1470198ac48c43f7d6f93a2a2687392040000")
+# the signed tx's txid (derived from the published final tx: double-SHA-256
+# of the witness-stripped serialization, displayed byte-reversed)
+BIP143_NEW_TXID = \
+    "ef48d9d0f595052e0f8cdcf825f7a5e50b6a388a81f206f3f4846e5ecd7a0c23"
+# address -> scriptPubKey pairs (BIP-350 published pairs + the Base58 forms)
+ADDR_SCRIPT_PAIRS = [
+    ("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4",
+     "0014751e76e8199196d454941c45d1b3a323f1433bd6"),
+    ("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7",
+     "00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"),
+    ("BC1SW50QGDZ25J", "6002751e"),
+    ("bc1zw508d6qejxtdg4y5r3zarvaryvaxxpcs",
+     "5210751e76e8199196d454941c45d1b3a323"),
+    ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0",
+     "512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
+    ("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+     "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"),
+    ("3JvL6Ymt8MVWiCNHC7oWU6nLeHNJKLZGLN",
+     "a914bcfeb728b584253d5f3f70bcb780e9ef218a68f487"),
+]
+
+
+def _sig_to_der(sig64):
+    def trim_pad(b):
+        b = b.lstrip(b"\x00") or b"\x00"
+        if b[0] >= 0x80:
+            b = b"\x00" + b
+        return b
+    r, s = trim_pad(sig64[:32]), trim_pad(sig64[32:64])
+    body = bytes([0x02, len(r)]) + r + bytes([0x02, len(s)]) + s
+    return bytes([0x30, len(body)]) + body
+
+
+def _address_to_script(addr):
+    if addr.lower()[:3] in ("bc1", "tb1"):
+        got = _bech32_decode(addr)
+        if isinstance(got, str):
+            return None
+        _, witver, prog = got
+        op = 0 if witver == 0 else 0x50 + witver
+        return bytes([op, len(prog)]) + prog
+    try:
+        raw = _b58decode(addr)
+    except ValueError:
+        return None
+    body, chk = raw[:-4], raw[-4:]
+    if _dsha(body)[:4] != chk or len(body) != 21:
+        return None
+    version, h20 = body[0], body[1:]
+    if version in (0x00, 0x6F):
+        return b"\x76\xa9\x14" + h20 + b"\x88\xac"
+    if version in (0x05, 0xC4):
+        return b"\xa9\x14" + h20 + b"\x87"
+    return None
+
+
+def _btc_sign_p2wpkh(lib, sk, txid_be_hex, vout, amount, outputs, nested,
+                     version, sequence, locktime):
+    """1:1 mirror of cxBtcTxSignP2WPKH; outputs is [(sats, address), ...].
+    Returns (new_txid_hex, sighash_hex, raw_bytes)."""
+    def u32(n):
+        return n.to_bytes(4, "little")
+
+    def u64(n):
+        return n.to_bytes(8, "little")
+
+    pub = pubkey(lib, sk, True)
+    h160 = _h160(pub)
+    outpoint = bytes.fromhex(txid_be_hex)[::-1] + u32(vout)
+    outs = b""
+    for amt, addr in outputs:
+        script = _address_to_script(addr)
+        outs += u64(amt) + bytes([len(script)]) + script
+    script_code = b"\x19\x76\xa9\x14" + h160 + b"\x88\xac"
+    preimage = (u32(version) + _dsha(outpoint) + _dsha(u32(sequence))
+                + outpoint + script_code + u64(amount) + u32(sequence)
+                + _dsha(outs) + u32(locktime) + u32(1))
+    sighash = _dsha(preimage)
+    sig = ctypes.create_string_buffer(64)
+    rc = lib.cnx_ecdsa_sign(sk, sighash, sig)
+    assert rc == 0
+    der = _sig_to_der(sig.raw) + b"\x01"
+    if nested:
+        redeem = b"\x00\x14" + h160
+        script_sig = bytes([len(redeem) + 1, len(redeem)]) + redeem
+    else:
+        script_sig = b"\x00"
+    body_in = outpoint + script_sig + u32(sequence)
+    outs_counted = bytes([len(outputs)]) + outs
+    witness = b"\x02" + bytes([len(der)]) + der + b"\x21" + pub
+    raw = (u32(version) + b"\x00\x01\x01" + body_in + outs_counted
+           + witness + u32(locktime))
+    stripped = u32(version) + b"\x01" + body_in + outs_counted + u32(locktime)
+    return _dsha(stripped)[::-1].hex(), sighash.hex(), raw
+
+
+def run_btc_tx_checks(lib, kat):
+    kat.check("BIP-143 example pubkey",
+              pubkey(lib, BIP143_KEY, True).hex() == BIP143_PUB)
+    txid, sighash, raw = _btc_sign_p2wpkh(
+        lib, BIP143_KEY, BIP143_TXID, BIP143_VOUT, BIP143_AMOUNT,
+        [BIP143_OUT1, BIP143_OUT2], True,
+        BIP143_VERSION, BIP143_SEQUENCE, BIP143_LOCKTIME)
+    kat.check("BIP-143 sighash matches the published value",
+              sighash == BIP143_SIGHASH, sighash)
+    kat.check("BIP-143 raw signed tx byte-identical to the BIP's example",
+              raw.hex() == BIP143_RAW, raw.hex())
+    kat.check("BIP-143 new txid", txid == BIP143_NEW_TXID, txid)
+    # the DER signature inside it is the published one; also pin the encoder
+    sig = ctypes.create_string_buffer(64)
+    lib.cnx_ecdsa_sign(BIP143_KEY, bytes.fromhex(BIP143_SIGHASH), sig)
+    kat.check("DER of the example signature matches the BIP",
+              _sig_to_der(sig.raw).hex() == BIP143_DER)
+    # constructed DER edges: high-bit pad, leading-zero trim, zero integer
+    edge = _sig_to_der(bytes([0x80] + [0x11] * 31 + [0x00, 0x00]
+                             + [0x7F] + [0x22] * 29))
+    kat.check("DER pads a set high bit and trims leading zeros",
+              edge.hex() == "30430221" + "0080" + "11" * 31
+              + "021e" + "7f" + "22" * 29)
+    kat.check("DER encodes zero as a single 00 byte",
+              _sig_to_der(bytes(64)).hex() == "3006020100020100")
+    # python-ecdsa cross-check of the DER framing, when available
+    try:
+        from ecdsa.util import sigdecode_der
+        from ecdsa import SECP256k1
+        r, s = sigdecode_der(bytes.fromhex(BIP143_DER), SECP256k1.order)
+        kat.check("python-ecdsa parses our DER to the same r/s",
+                  r == int.from_bytes(sig.raw[:32], "big")
+                  and s == int.from_bytes(sig.raw[32:], "big"))
+    except ImportError:
+        kat.skip("python-ecdsa DER cross-check", "ecdsa not installed")
+    # address -> scriptPubKey pairs, and fail-closed on a corrupt address
+    for addr, want in ADDR_SCRIPT_PAIRS:
+        got = _address_to_script(addr)
+        kat.check(f"addr->script {addr[:20]}...",
+                  got is not None and got.hex() == want)
+    kat.check("addr->script rejects a corrupt checksum",
+              _address_to_script("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMx") is None)
+
+
+# ---------------------------------------------------------------------------
 # The wallet-restore path (the demo's headline feature): the canonical BIP-39
 # test mnemonic restores, through the SHIM's real HD-node derivation, to the
 # OFFICIAL BIP-84 and BIP-86 first addresses (those two strings are printed
@@ -1429,6 +1603,7 @@ def main(argv):
         run_taproot_checks(lib, kat)
         run_phase5_encoder_checks(lib, kat)
         run_rlp_eip155_checks(lib, kat)
+        run_btc_tx_checks(lib, kat)
         run_restore_checks(lib, kat)
 
     if kat.problems:

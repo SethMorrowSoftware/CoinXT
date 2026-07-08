@@ -1063,6 +1063,298 @@ function cxRlpUIntDec pDecimal
    return cxRlpUIntBytes(tOut)
 end cxRlpUIntDec
 
+-- ---- Bitcoin transactions (BIP-143 P2WPKH signing) ----
+--
+-- The tx-building LAYER for the simplest, most common spend: one P2WPKH
+-- (or BIP-49 nested P2SH-P2WPKH) input, any number of standard outputs.
+-- SPEC rule 3 still holds: the CALLER shows the decoded fields and the fee
+-- to a human before anything is broadcast; these functions only encode,
+-- hash, and sign. Every piece is locked byte for byte to the OFFICIAL
+-- BIP-143 P2SH-P2WPKH example (whose deterministic RFC 6979 signature the
+-- shim reproduces exactly) in tools/coin-kat.py and the on-engine harness.
+
+-- little-endian fixed-width unsigned ints (tx serialization)
+private function cxU32LE pN
+   local tOut
+   local tN
+   put empty into tOut
+   put pN into tN
+   repeat 4 times
+      put numToByte(tN mod 256) after tOut
+      put tN div 256 into tN
+   end repeat
+   return tOut
+end cxU32LE
+
+private function cxU64LE pN
+   -- a satoshi amount tops out at 2.1e15, safely inside the 2^53 exact range
+   local tOut
+   local tN
+   put empty into tOut
+   put pN into tN
+   repeat 8 times
+      put numToByte(tN mod 256) after tOut
+      put tN div 256 into tN
+   end repeat
+   return tOut
+end cxU64LE
+
+-- Bitcoin varint (this builder never exceeds the 2-byte form)
+private function cxVarInt pN
+   if pN < 253 then
+      return numToByte(pN)
+   end if
+   return numToByte(253) & numToByte(pN mod 256) & numToByte(pN div 256)
+end cxVarInt
+
+-- byte reversal: a txid DISPLAYS big-endian but serializes little-endian
+private function cxReverseBytes pData
+   local tOut
+   local tIdx
+   put empty into tOut
+   repeat with tIdx = (the number of bytes in pData) down to 1
+      put byte tIdx of pData after tOut
+   end repeat
+   return tOut
+end cxReverseBytes
+
+-- one DER integer body: trim leading zero bytes (keep one for zero) and
+-- 0x00-pad a set high bit (DER integers are signed)
+private function cxDerInt p32
+   local tIdx
+   local tStart
+   local tVal
+   put 0 into tStart
+   repeat with tIdx = 1 to the number of bytes in p32
+      if byteToNum(byte tIdx of p32) is not 0 then
+         put tIdx into tStart
+         exit repeat
+      end if
+   end repeat
+   if tStart is 0 then
+      return numToByte(0)
+   end if
+   put byte tStart to -1 of p32 into tVal
+   if byteToNum(byte 1 of tVal) >= 128 then
+      return numToByte(0) & tVal
+   end if
+   return tVal
+end cxDerInt
+
+-- strict-DER (BIP-66) encoding of a raw 64-byte r||s signature: the form a
+-- Bitcoin transaction carries (the caller appends the sighash-type byte).
+-- cxSign / cxVerify keep the raw 64-byte form. Locked to the BIP-143
+-- example signature plus constructed padding/trimming edges.
+function cxSigToDer pSig64
+   local tR
+   local tS
+   local tBody
+   if the number of bytes in pSig64 is not 64 then
+      return "CoinXT: a raw signature is 64 bytes (cxSigToDer)"
+   end if
+   put cxDerInt(byte 1 to 32 of pSig64) into tR
+   put cxDerInt(byte 33 to 64 of pSig64) into tS
+   put numToByte(2) & numToByte(the number of bytes in tR) & tR \
+      & numToByte(2) & numToByte(the number of bytes in tS) & tS into tBody
+   return numToByte(48) & numToByte(the number of bytes in tBody) & tBody
+end cxSigToDer
+
+-- scriptPubKey for ANY address CoinXT can decode: legacy P2PKH (1/m/n),
+-- P2SH (3/2), and every SegWit witness version (v0 Bech32, v1+ Bech32m).
+-- The underlying decoder verifies the checksum, so a typo'd destination
+-- yields a clean CoinXT: error, never a spendable-looking script. Locked
+-- to the published BIP-350 address->scriptPubKey pairs.
+function cxAddressToScript pAddress
+   local tPfx
+   local tDec
+   local tVer
+   local tProg
+   local tOpcode
+   put toLower(char 1 to 3 of pAddress) into tPfx
+   if tPfx is "bc1" or tPfx is "tb1" then
+      put cxBech32Decode(pAddress) into tDec
+      if cxIsError(tDec) then
+         return tDec && "(cxAddressToScript)"
+      end if
+      put line 2 of tDec into tVer
+      put line 3 to -1 of tDec into tProg
+      -- OP_0 for v0; OP_1..OP_16 are 0x51..0x60 (0x50 + version)
+      if tVer is 0 then
+         put 0 into tOpcode
+      else
+         put 80 + tVer into tOpcode
+      end if
+      return numToByte(tOpcode) & numToByte(the number of bytes in tProg) & tProg
+   end if
+   put cxBase58CheckDecode(pAddress) into tDec
+   if cxIsError(tDec) then
+      return tDec && "(cxAddressToScript)"
+   end if
+   put line 1 of tDec into tVer
+   put line 2 to -1 of tDec into tProg
+   if the number of bytes in tProg is not 20 then
+      return "CoinXT: not a 20-byte address payload (cxAddressToScript)"
+   end if
+   if tVer is 0 or tVer is 111 then
+      -- P2PKH: OP_DUP OP_HASH160 PUSH20 <h160> OP_EQUALVERIFY OP_CHECKSIG
+      return numToByte(118) & numToByte(169) & numToByte(20) & tProg \
+         & numToByte(136) & numToByte(172)
+   end if
+   if tVer is 5 or tVer is 196 then
+      -- P2SH: OP_HASH160 PUSH20 <h160> OP_EQUAL
+      return numToByte(169) & numToByte(20) & tProg & numToByte(135)
+   end if
+   return "CoinXT: not a Bitcoin address version (cxAddressToScript)"
+end cxAddressToScript
+
+-- Build and sign a complete single-input Bitcoin transaction spending a
+-- P2WPKH coin (pNested false) or a BIP-49 nested P2SH-P2WPKH coin (pNested
+-- true) owned by pSeckey, with the BIP-143 sighash, SIGHASH_ALL, RFC 6979.
+--
+--   pSeckey      32-byte secret key that owns the funding output
+--   pTxid        the funding txid AS DISPLAYED (64 hex chars, big-endian)
+--   pVout        index of the funding output in that transaction
+--   pAmountSats  value of the funding output in satoshis
+--   pOutputs     one output per line: "amountSats address" (any address
+--                form cxAddressToScript accepts)
+--   pNested      true when the funding output is P2SH-P2WPKH
+--   pVersion / pSequence / pLocktime  pass empty for 2 / 4294967293 (RBF)
+--                / 0; the BIP-143 example uses 1 / 4294967294 / 1170
+--
+-- Returns txid & LF & sighash hex & LF & the raw signed tx (Data, LAST, so
+-- take `line 3 to -1`). Fails closed on every malformed field and on
+-- outputs exceeding the input (a negative fee can only be a mistake).
+function cxBtcTxSignP2WPKH pSeckey, pTxid, pVout, pAmountSats, pOutputs, pNested, pVersion, pSequence, pLocktime
+   local tVersion
+   local tSequence
+   local tLocktime
+   local tPub
+   local tH160
+   local tOutpoint
+   local tOuts
+   local tCount
+   local tTotal
+   local tLine
+   local tAmt
+   local tAddr
+   local tScript
+   local tScriptCode
+   local tPreimage
+   local tSighash
+   local tSig
+   local tDer
+   local tRedeem
+   local tScriptSig
+   local tWitness
+   local tBodyIn
+   local tOutsCounted
+   local tStripped
+   local tRaw
+   local tTxidBytes
+   -- defaults, then range checks (all three serialize as 4-byte LE)
+   if pVersion is empty then
+      put 2 into tVersion
+   else
+      put pVersion into tVersion
+   end if
+   if pSequence is empty then
+      put 4294967293 into tSequence
+   else
+      put pSequence into tSequence
+   end if
+   if pLocktime is empty then
+      put 0 into tLocktime
+   else
+      put pLocktime into tLocktime
+   end if
+   if tVersion is not an integer or tVersion < 0 or tVersion > 4294967295 then
+      return "CoinXT: version must be a 32-bit integer (cxBtcTxSignP2WPKH)"
+   end if
+   if tSequence is not an integer or tSequence < 0 or tSequence > 4294967295 then
+      return "CoinXT: sequence must be a 32-bit integer (cxBtcTxSignP2WPKH)"
+   end if
+   if tLocktime is not an integer or tLocktime < 0 or tLocktime > 4294967295 then
+      return "CoinXT: locktime must be a 32-bit integer (cxBtcTxSignP2WPKH)"
+   end if
+   if cxSeckeyValidate(pSeckey) is false then
+      return "CoinXT: not a valid 32-byte secret key (cxBtcTxSignP2WPKH)"
+   end if
+   put cxHexDecode(pTxid) into tTxidBytes
+   if cxIsError(tTxidBytes) or the number of bytes in tTxidBytes is not 32 then
+      return "CoinXT: the funding txid must be 64 hex characters (cxBtcTxSignP2WPKH)"
+   end if
+   if pVout is not an integer or pVout < 0 or pVout > 4294967295 then
+      return "CoinXT: vout must be a 32-bit integer (cxBtcTxSignP2WPKH)"
+   end if
+   if pAmountSats is not an integer or pAmountSats < 0 or pAmountSats > 2100000000000000 then
+      return "CoinXT: the input amount must be 0..21M BTC in satoshis (cxBtcTxSignP2WPKH)"
+   end if
+   -- parse and encode the outputs; refuse a negative fee
+   put empty into tOuts
+   put 0 into tCount
+   put 0 into tTotal
+   repeat for each line tLine in pOutputs
+      if tLine is empty then
+         next repeat
+      end if
+      put word 1 of tLine into tAmt
+      put word 2 of tLine into tAddr
+      if tAmt is not an integer or tAmt < 0 or tAmt > 2100000000000000 or tAddr is empty then
+         return "CoinXT: each output line is 'amountSats address' (cxBtcTxSignP2WPKH)"
+      end if
+      put cxAddressToScript(tAddr) into tScript
+      if cxIsError(tScript) then
+         return tScript && "(cxBtcTxSignP2WPKH)"
+      end if
+      put cxU64LE(tAmt) & cxVarInt(the number of bytes in tScript) & tScript after tOuts
+      add 1 to tCount
+      add tAmt to tTotal
+   end repeat
+   if tCount is 0 then
+      return "CoinXT: no outputs (cxBtcTxSignP2WPKH)"
+   end if
+   if tTotal > pAmountSats then
+      return "CoinXT: outputs exceed the input; the fee cannot be negative (cxBtcTxSignP2WPKH)"
+   end if
+   -- BIP-143 sighash (SIGHASH_ALL): the txid serializes byte-reversed
+   put cxPublicKey(pSeckey, true) into tPub
+   if cxIsError(tPub) then
+      return tPub && "(cxBtcTxSignP2WPKH)"
+   end if
+   put cxHash160(tPub) into tH160
+   put cxReverseBytes(tTxidBytes) & cxU32LE(pVout) into tOutpoint
+   put numToByte(25) & numToByte(118) & numToByte(169) & numToByte(20) \
+      & tH160 & numToByte(136) & numToByte(172) into tScriptCode
+   put cxU32LE(tVersion) & cxHash256(tOutpoint) & cxHash256(cxU32LE(tSequence)) \
+      & tOutpoint & tScriptCode & cxU64LE(pAmountSats) & cxU32LE(tSequence) \
+      & cxHash256(tOuts) & cxU32LE(tLocktime) & cxU32LE(1) into tPreimage
+   put cxHash256(tPreimage) into tSighash
+   put cxSign(pSeckey, tSighash) into tSig
+   if cxIsError(tSig) then
+      return tSig && "(cxBtcTxSignP2WPKH)"
+   end if
+   put cxSigToDer(tSig) & numToByte(1) into tDer
+   -- assemble: a native input has an empty scriptSig; a nested one pushes
+   -- the redeemScript (the P2WPKH witness program)
+   if pNested is true then
+      put numToByte(0) & numToByte(20) & tH160 into tRedeem
+      put cxVarInt(the number of bytes in tRedeem + 1) \
+         & cxVarInt(the number of bytes in tRedeem) & tRedeem into tScriptSig
+   else
+      put numToByte(0) into tScriptSig
+   end if
+   put numToByte(2) & cxVarInt(the number of bytes in tDer) & tDer \
+      & cxVarInt(33) & tPub into tWitness
+   put tOutpoint & tScriptSig & cxU32LE(tSequence) into tBodyIn
+   put cxVarInt(tCount) & tOuts into tOutsCounted
+   put cxU32LE(tVersion) & numToByte(0) & numToByte(1) & cxVarInt(1) & tBodyIn \
+      & tOutsCounted & tWitness & cxU32LE(tLocktime) into tRaw
+   -- the txid hashes the tx WITHOUT witness data, and displays byte-reversed
+   put cxU32LE(tVersion) & cxVarInt(1) & tBodyIn & tOutsCounted & cxU32LE(tLocktime) into tStripped
+   return cxHexEncode(cxReverseBytes(cxHash256(tStripped))) & return \
+      & cxHexEncode(tSighash) & return & tRaw
+end cxBtcTxSignP2WPKH
+
 --
 -- entropy <-> words + the checksum word are pure bytes over cxSha256; the
 -- mnemonic -> seed step is PBKDF2-HMAC-SHA512 (cxPbkdf2HmacSha512), 2048

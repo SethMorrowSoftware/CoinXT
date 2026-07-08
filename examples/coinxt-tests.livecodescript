@@ -96,6 +96,17 @@ constant kRestAEth1 = "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0"
 constant kTxKey = "4646464646464646464646464646464646464646464646464646464646464646"
 constant kTxHash = "daf5a779ae972f972197303d7b574746c7ef83eadac0f2791ad23db92e4c8e53"
 constant kTxRaw = "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83"
+-- the OFFICIAL BIP-143 P2SH-P2WPKH example (every value printed in the BIP;
+-- the addresses are the P2PKH form of the published output hash160s, and
+-- the new txid is derived from the published final tx)
+constant kBtcKey = "eb696a065ef48a2192da5b28b694f87544b30fae8327c4510137a922f32c6dcf"
+constant kBtcTxid = "77541aeb3c4dac9260b68f74f44c973081a9d4cb2ebe8038b2d70faa201b6bdb"
+constant kBtcOut1 = "1Fyxts6r24DpEieygQiNnWxUdb18ANa5p7"
+constant kBtcOut2 = "1Q5YjKVj5yQWHBBsyEBamkfph3cA6G9KK8"
+constant kBtcSighash = "64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c92e59fb6"
+constant kBtcDer = "3044022047ac8e878352d3ebbde1c94ce3a10d057c24175747116f8288e5d794d12d482f0220217f36a485cae903c713331d877c1f64677e3622ad4010726870540656fe9dcb"
+constant kBtcRaw = "01000000000101db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a5477010000001716001479091972186c449eb1ded22b78e40d009bdf0089feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac02473044022047ac8e878352d3ebbde1c94ce3a10d057c24175747116f8288e5d794d12d482f0220217f36a485cae903c713331d877c1f64677e3622ad4010726870540656fe9dcb012103ad1d8e89212f0b92c74d23bb710c00662ad1470198ac48c43f7d6f93a2a2687392040000"
+constant kBtcNewTxid = "ef48d9d0f595052e0f8cdcf825f7a5e50b6a388a81f206f3f4846e5ecd7a0c23"
 
 function cxSelfTest
    local tAbi
@@ -148,6 +159,7 @@ function cxSelfTest
    testEthPersonal
    testRlp
    testEthTx
+   testBtcTx
    testMnemonics
    testHd
    testSchnorr
@@ -494,6 +506,52 @@ on testEthTx
       "the raw signed tx is byte-identical to the EIP's published example"
    put empty into tSk
 end testEthTx
+
+-- the Bitcoin offline-signing chain, end to end: address->script, BIP-143
+-- sighash, RFC 6979 sign, strict DER, witness serialization - against the
+-- official BIP-143 P2SH-P2WPKH example printed in the BIP
+on testBtcTx
+   local tSk
+   local tOutputs
+   local tRes
+   local tSig
+   cxtSection "BIP-143 offline transaction (the official example)"
+   put cxtBin(kBtcKey) into tSk
+   put "199996600" && kBtcOut1 & return & "800000000" && kBtcOut2 into tOutputs
+   put cxBtcTxSignP2WPKH(tSk, kBtcTxid, 1, 1000000000, tOutputs, true, \
+      1, 4294967294, 1170) into tRes
+   if cxIsError(tRes) then
+      cxtCheck false, "cxBtcTxSignP2WPKH returned:" && tRes
+   else
+      cxtCheck (line 1 of tRes is kBtcNewTxid), \
+         "the signed tx's txid matches the published example"
+      cxtCheck (line 2 of tRes is kBtcSighash), \
+         "the BIP-143 sighash matches the published value"
+      cxtCheck (cxHexEncode(line 3 to -1 of tRes) is kBtcRaw), \
+         "the raw signed tx is byte-identical to the BIP's example"
+   end if
+   -- the DER encoder alone, against the published signature
+   put cxSign(tSk, cxtBin(kBtcSighash)) into tSig
+   cxtCheck (cxHexEncode(cxSigToDer(tSig)) is kBtcDer), \
+      "cxSigToDer reproduces the published DER signature"
+   cxtCheck cxIsError(cxSigToDer(cxtAscii("short"))), \
+      "a wrong-length raw signature is rejected"
+   -- address -> scriptPubKey (the BIP-350 pair + fail closed)
+   cxtCheck (cxHexEncode(cxAddressToScript(kAddrP2WPKH)) is \
+      "0014751e76e8199196d454941c45d1b3a323f1433bd6"), \
+      "addr->script reproduces the BIP-350 published scriptPubKey"
+   cxtCheck (cxHexEncode(cxAddressToScript(kAddrP2PKH)) is \
+      "76a914751e76e8199196d454941c45d1b3a323f1433bd688ac"), \
+      "addr->script frames the legacy P2PKH script"
+   cxtCheck cxIsError(cxAddressToScript("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMx")), \
+      "a corrupt destination address yields a clean error, never a script"
+   -- fail closed: outputs above the input (a negative fee) refuse to sign
+   put "1000000001" && kBtcOut1 into tOutputs
+   cxtCheck cxIsError(cxBtcTxSignP2WPKH(tSk, kBtcTxid, 1, 1000000000, \
+      tOutputs, true, 1, 4294967294, 1170)), \
+      "outputs exceeding the input are rejected (no negative fee)"
+   put empty into tSk
+end testBtcTx
 
 -- the demo's headline flow, end to end on-engine: the canonical mnemonic
 -- restores to the published first addresses of every standard path (the
