@@ -598,7 +598,10 @@ function cxBech32Encode pHrp, pWitVer, pProgram
    if pWitVer is 0 then
       put 1 into tConst
    else
-      put 719259665 into tConst
+      -- Bech32m constant 0x2bc830a3 (BIP-350), used for witness v1+ (Taproot).
+      -- This path is now exercised by cxBtcAddressP2TR and locked to the
+      -- BIP-86 bc1p vectors in tools/coin-kat.py.
+      put 734539939 into tConst
    end if
    -- data = witver (one 5-bit value) then the 8->5 conversion of the program
    put numToByte(pWitVer) & cxBits8to5(pProgram) into tValues
@@ -1164,3 +1167,90 @@ function cxXpub pNode, pMainnet
    end if
    return cxB58Encode(tBody & (byte 1 to 4 of tCheck))
 end cxXpub
+
+----------------------------------------------------------------------
+-- Schnorr / BIP-340 + Taproot (phase 4b)
+--
+-- BIP-340 Schnorr signing/verification over a 32-byte message (as with
+-- cxSign, the app hands CoinXT the exact digest; Taproot always signs a
+-- 32-byte sighash). The x-only public key is 32 bytes. cxBtcAddressP2TR
+-- performs the BIP-341 key-path tweak in the shim, then Bech32m-frames the
+-- witness-v1 output key into a bc1p address. All native ops are transcribed
+-- from the published BIP-340/341 schemes and pinned to the official vectors
+-- (BIP-340 test vectors, BIP-86 addresses) in tools/coin-kat.py.
+----------------------------------------------------------------------
+
+-- the 32-byte BIP-340 x-only public key of a 32-byte secret key
+function cxXonlyFromSeckey pSeckey
+   local tOut
+   try
+      put cxbXonlyFromSeckey(pSeckey) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxXonlyFromSeckey)")
+   end try
+   return tOut
+end cxXonlyFromSeckey
+
+-- BIP-340 sign: 32-byte seckey, 32-byte message, OPTIONAL 32-byte aux_rand
+-- (pass empty to omit; the shim then uses 32 zero bytes, the BIP-340 default).
+-- Returns the 64-byte signature, or a CoinXT: error.
+function cxSchnorrSign pSeckey, pMessage, pAuxRand
+   local tOut
+   try
+      put cxbSchnorrSign(pSeckey, pMessage, pAuxRand) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxSchnorrSign)")
+   end try
+   return tOut
+end cxSchnorrSign
+
+-- BIP-340 verify: 32-byte x-only pubkey, 32-byte message, 64-byte signature.
+-- Returns true only for a valid signature; every malformed input is false.
+function cxSchnorrVerify pXonly, pMessage, pSig
+   try
+      return cxbSchnorrVerify(pXonly, pMessage, pSig)
+   catch tErr
+      return false
+   end try
+end cxSchnorrVerify
+
+-- BIP-341 key-path Taproot output key: tweak a 32-byte x-only INTERNAL key to
+-- the 32-byte witness-v1 OUTPUT key. Public helper for callers that want the
+-- raw output key; cxBtcAddressP2TR wraps it into a bc1p address.
+function cxTaprootOutputKey pXonlyInternal
+   local tOut
+   try
+      put cxbTaprootTweak(pXonlyInternal) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxTaprootOutputKey)")
+   end try
+   return tOut
+end cxTaprootOutputKey
+
+-- Taproot P2TR address (BIP-86 single-key). Takes a pubkey (33/65-byte SEC1,
+-- or a 32-byte x-only internal key), tweaks it to the output key, and Bech32m-
+-- frames it as a witness-v1 bc1p (mainnet, default) / tb1p (testnet) address.
+function cxBtcAddressP2TR pPubkey, pMainnet
+   local tXonly
+   local tOutputKey
+   local tHrp
+   -- accept a full SEC1 pubkey (drop the prefix to the 32-byte x) or an
+   -- already-x-only 32-byte key
+   if the number of bytes in pPubkey is 33 or the number of bytes in pPubkey is 65 then
+      put byte 2 to 33 of pPubkey into tXonly
+   else if the number of bytes in pPubkey is 32 then
+      put pPubkey into tXonly
+   else
+      return "CoinXT: P2TR needs a 33/65-byte pubkey or a 32-byte x-only key (cxBtcAddressP2TR)"
+   end if
+   put cxTaprootOutputKey(tXonly) into tOutputKey
+   if cxIsError(tOutputKey) then
+      return tOutputKey && "(cxBtcAddressP2TR)"
+   end if
+   if pMainnet is false then
+      put "tb" into tHrp
+   else
+      put "bc" into tHrp
+   end if
+   return cxBech32Encode(tHrp, 1, tOutputKey)
+end cxBtcAddressP2TR

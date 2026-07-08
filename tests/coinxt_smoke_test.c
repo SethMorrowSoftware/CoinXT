@@ -38,6 +38,7 @@ extern int cnx_hdnode_chaincode(const unsigned char *, unsigned char *);
 extern int cnx_xonly_from_seckey(const unsigned char *, unsigned char *);
 extern int cnx_schnorr_sign(const unsigned char *, const unsigned char *, const unsigned char *, unsigned char *);
 extern int cnx_schnorr_verify(const unsigned char *, const unsigned char *, const unsigned char *);
+extern int cnx_taproot_tweak_pubkey(const unsigned char *, unsigned char *);
 extern int cnx_wipe(unsigned char *, size_t);
 
 static int eq(const unsigned char *b, const char *hexexp) {
@@ -111,6 +112,9 @@ int main(void) {
   NEED(cnx_schnorr_verify(xonly, hash, schsig) == 0, "schnorr verify aux");
   schsig[10] ^= 1;
   NEED(cnx_schnorr_verify(xonly, hash, schsig) != 0, "schnorr corrupt rejected");
+  /* Taproot: tweak the x-only key to a witness-v1 output key (BIP-341/86;
+   * the vectors are pinned in tools/coin-kat.py) */
+  NEED(cnx_taproot_tweak_pubkey(xonly, o) == 0, "taproot tweak");
   NEED(cnx_wipe(sh1, 32) == 0 && sh1[0] == 0 && sh1[31] == 0, "wipe");
   printf("cnx_selftest: OK\n");
   return 0;

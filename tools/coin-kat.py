@@ -163,6 +163,7 @@ def load(out_path):
         "cnx_xonly_from_seckey": [buf, buf],
         "cnx_schnorr_sign": [buf, buf, buf, buf],
         "cnx_schnorr_verify": [buf, buf, buf],
+        "cnx_taproot_tweak_pubkey": [buf, buf],
         # hygiene
         "cnx_wipe": [buf, size],
     }
@@ -941,6 +942,65 @@ def run_schnorr_checks(lib, kat):
     kat.check("BIP-340 NULL aux == zero aux", rc == 0 and out.raw == bytes.fromhex(sig), f"rc={rc}")
 
 
+# ---------------------------------------------------------------------------
+# Taproot (BIP-341 key-path tweak + BIP-86 address). The shim's
+# cnx_taproot_tweak_pubkey computes the witness-v1 output key
+# Q = P + int(hash_TapTweak(P))*G; this section pins it (and the Bech32m bc1p
+# address the script layer builds) to the OFFICIAL BIP-86 test vectors, cross-
+# checked against an independent tweak using the BIP-340 reference point ops.
+# (internal x-only key, expected output key, expected bc1p address).
+TAPROOT_VECTORS = [
+    ("cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115",
+     "a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c",
+     "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"),
+    ("83dfe85a3151d2517290da461fe2815591ef69f2b18a2ce63f01697a8b313145",
+     "a82f29944d65b86ae6b5e5cc75e294ead6c59391a1edc5e016e3498c67fc7bbb",
+     "bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh"),
+    ("399f1b2f4393f29a18c937859c5dd8a77350103157eb880f02e8c08214277cef",
+     "882d74e5d0572d5a816cef0041a96b6c1de832f6f9676d9605c44d5e9a97d3dc",
+     "bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7"),
+]
+
+
+def _tr_ref_tweak(internal):
+    # BIP-341 key-path-only output key, via the BIP-340 reference point ops.
+    t = int.from_bytes(_sn_taghash("TapTweak", internal), "big")
+    P = _sn_lift_x(int.from_bytes(internal, "big"))
+    Q = _sn_add(P, _sn_mul(_SECP_G, t))
+    return Q[0].to_bytes(32, "big")
+
+
+def _bech32m_p2tr(hrp, prog):
+    # witness v1 + 32-byte program, Bech32m (const 0x2bc830a3), the exact
+    # encoding cxBtcAddressP2TR must produce.
+    data = [1]
+    acc = bits = 0
+    for b in prog:
+        acc = (acc << 8) | b
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            data.append((acc >> bits) & 31)
+    if bits:
+        data.append((acc << (5 - bits)) & 31)
+    expand = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+    polymod = _bech32_polymod(expand + data + [0] * 6) ^ 0x2BC830A3
+    checksum = [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
+    return hrp + "1" + "".join(_BECH32[d] for d in data + checksum)
+
+
+def run_taproot_checks(lib, kat):
+    for internal, output, address in TAPROOT_VECTORS:
+        ib, ob = bytes.fromhex(internal), bytes.fromhex(output)
+        # independent reference reproduces the published output key + address
+        kat.check(f"BIP-86 ref tweak {address[:12]}", _tr_ref_tweak(ib) == ob)
+        kat.check(f"BIP-86 ref bech32m {address[:12]}", _bech32m_p2tr("bc", ob) == address)
+        # the shim's tweak matches the published output key
+        out = ctypes.create_string_buffer(32)
+        rc = lib.cnx_taproot_tweak_pubkey(ib, out)
+        kat.check(f"BIP-86 shim tweak {address[:12]}", rc == 0 and out.raw == ob, f"rc={rc}")
+
+
 def main(argv):
     check = "--check" in argv[1:]
     cc = find_cc()
@@ -969,6 +1029,7 @@ def main(argv):
         run_bip39_checks(lib, kat)
         run_hd_checks(lib, kat)
         run_schnorr_checks(lib, kat)
+        run_taproot_checks(lib, kat)
 
     if kat.problems:
         for p in kat.problems:

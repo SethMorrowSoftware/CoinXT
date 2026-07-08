@@ -704,3 +704,31 @@ int cnx_schnorr_verify(const unsigned char *pk32, const unsigned char *msg32,
   ok = !point_is_infinity(&sG) && !bn_is_odd(&sG.y) && bn_is_equal(&sG.x, &r);
   return ok ? CNX_OK : CNX_ERR_BADSIG;
 }
+
+/* BIP-341 Taproot output key for a KEY-PATH-ONLY output (no script tree):
+ * Q = P + int(hash_TapTweak(bytes(P)))*G, where P = lift_x(xonly_internal). The
+ * output is x(Q), the 32-byte witness-v1 program the script layer wraps in a
+ * Bech32m bc1p address. Like BIP-340, this transcribes a PUBLIC scheme over the
+ * vendored primitives; it is pinned to the official BIP-86 vectors headless.
+ * (A script-path Taproot would tweak by hash(P || merkle_root); CoinXT exposes
+ * the common single-key case, and documents the boundary.) */
+int cnx_taproot_tweak_pubkey(const unsigned char *xonly32, unsigned char *out32) {
+  unsigned char t_bytes[32];
+  bignum256 t;
+  curve_point P, tG;
+  if (xonly32 == NULL || out32 == NULL) return CNX_ERR_NULL;
+  /* P = lift_x(xonly): x < p and (x, even y) on the curve */
+  bn_read_be(xonly32, &P.x);
+  if (!bn_is_less(&P.x, &secp256k1.prime)) return CNX_ERR_BADKEY;
+  uncompress_coords(&secp256k1, 0x02 /* even y */, &P.x, &P.y);
+  if (!ecdsa_validate_pubkey(&secp256k1, &P)) return CNX_ERR_BADKEY;
+  /* t = int(hash_TapTweak(xonly)); must be a valid scalar (< n) */
+  cnx_tagged_hash("TapTweak", 8, xonly32, 32, t_bytes);
+  bn_read_be(t_bytes, &t);
+  if (!bn_is_less(&t, &secp256k1.order)) return CNX_ERR_BADKEY;
+  /* Q = P + t*G; output x(Q) */
+  if (scalar_multiply(&secp256k1, &t, &tG) != 0) return CNX_ERR_INTERNAL;
+  point_add(&secp256k1, &tG, &P); /* P = tG + P = P + t*G = Q */
+  bn_write_be(&P.x, out32);
+  return CNX_OK;
+}

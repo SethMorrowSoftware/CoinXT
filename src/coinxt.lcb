@@ -118,6 +118,16 @@ foreign handler _cnx_hdnode_private_key(in pNode as Pointer, in pOut as Pointer)
 foreign handler _cnx_hdnode_public_key(in pNode as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hdnode_public_key"
 foreign handler _cnx_hdnode_chaincode(in pNode as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hdnode_chaincode"
 
+/* BIP-340 Schnorr. aux_rand is genuinely optional: an ABSENT aux crosses as a
+   NULL pointer through an `optional Pointer` (a plain Pointer rejects nothing),
+   which the shim treats as 32 zero bytes (BIP-340's fully-defined default). */
+foreign handler _cnx_xonly_from_seckey(in pSk as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_xonly_from_seckey"
+foreign handler _cnx_schnorr_sign(in pSk as Pointer, in pMsg as Pointer, in pAux as optional Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_schnorr_sign"
+foreign handler _cnx_schnorr_verify(in pPub as Pointer, in pMsg as Pointer, in pSig as Pointer) returns CInt binds to "c:coinxt>cnx_schnorr_verify"
+foreign handler _cnx_taproot_tweak_pubkey(in pXonly as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_taproot_tweak_pubkey"
+foreign handler _cnx_xonly_len() returns UIntSize binds to "c:coinxt>cnx_xonly_len"
+foreign handler _cnx_schnorr_sig_len() returns UIntSize binds to "c:coinxt>cnx_schnorr_sig_len"
+
 foreign handler _cnx_wipe(in pBuf as Pointer, in pLen as UIntSize) returns CInt binds to "c:coinxt>cnx_wipe"
 
 /* a 1-byte module-lifetime block substituted for the byte pointer of an EMPTY
@@ -784,6 +794,131 @@ public handler cxbHdChainCode(in pNode as Data) returns Data
       cnxThrow(tRc, "hd chain code")
    end if
    return cnxTake(tOut, tOutLen)
+end handler
+
+/* ---- Schnorr / BIP-340 (Taproot) -------------------------------------------
+   The x-only pubkey and the signature are PUBLIC values (cnxTake, not the
+   secret path); the seckey input is secret and the script layer clears it.
+   The message is a 32-byte digest, exactly as for ECDSA: CoinXT signs what the
+   app hands it, never a preimage it builds. */
+
+public handler cxbXonlyFromSeckey(in pSk as Data) returns Data
+   variable tRc as Integer
+   variable tSkPtr as Pointer
+   variable tOut as Pointer
+   variable tSkLen as Integer
+   variable tOutLen as Integer
+   unsafe
+      put _cnx_seckey_len() into tSkLen
+      put _cnx_xonly_len() into tOutLen
+   end unsafe
+   cnxCheckLen(pSk, tSkLen, "xonly pubkey")
+   put cnxDataPtr(pSk) into tSkPtr
+   put cnxAlloc(tOutLen) into tOut
+   unsafe
+      put _cnx_xonly_from_seckey(tSkPtr, tOut) into tRc
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "xonly pubkey")
+   end if
+   return cnxTake(tOut, tOutLen)
+end handler
+
+/* aux_rand is optional: an EMPTY Data passes a NULL pointer (32 zero bytes in
+   the shim); a non-empty aux must be exactly 32 bytes. */
+public handler cxbSchnorrSign(in pSk as Data, in pMsg as Data, in pAux as Data) returns Data
+   variable tRc as Integer
+   variable tSkPtr as Pointer
+   variable tMsgPtr as Pointer
+   variable tAuxPtr as optional Pointer
+   variable tOut as Pointer
+   variable tSkLen as Integer
+   variable tMsgLen as Integer
+   variable tOutLen as Integer
+   unsafe
+      put _cnx_seckey_len() into tSkLen
+      put _cnx_digest_len() into tMsgLen
+      put _cnx_schnorr_sig_len() into tOutLen
+   end unsafe
+   cnxCheckLen(pSk, tSkLen, "schnorr sign")
+   cnxCheckLen(pMsg, tMsgLen, "schnorr sign")
+   if cnxDataLen(pAux) is 0 then
+      put nothing into tAuxPtr
+   else
+      cnxCheckLen(pAux, tMsgLen, "schnorr sign aux")
+      put cnxDataPtr(pAux) into tAuxPtr
+   end if
+   put cnxDataPtr(pSk) into tSkPtr
+   put cnxDataPtr(pMsg) into tMsgPtr
+   put cnxAlloc(tOutLen) into tOut
+   unsafe
+      put _cnx_schnorr_sign(tSkPtr, tMsgPtr, tAuxPtr, tOut) into tRc
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "schnorr sign")
+   end if
+   return cnxTake(tOut, tOutLen)
+end handler
+
+/* true only for a signature that verifies; every malformed input is false */
+public handler cxbSchnorrVerify(in pPub as Data, in pMsg as Data, in pSig as Data) returns Boolean
+   variable tRc as Integer
+   variable tPubPtr as Pointer
+   variable tMsgPtr as Pointer
+   variable tSigPtr as Pointer
+   variable tPubLen as Integer
+   variable tMsgLen as Integer
+   variable tSigLen as Integer
+   unsafe
+      put _cnx_xonly_len() into tPubLen
+      put _cnx_digest_len() into tMsgLen
+      put _cnx_schnorr_sig_len() into tSigLen
+   end unsafe
+   if cnxDataLen(pPub) is not tPubLen then
+      return false
+   end if
+   if cnxDataLen(pMsg) is not tMsgLen then
+      return false
+   end if
+   if cnxDataLen(pSig) is not tSigLen then
+      return false
+   end if
+   put cnxDataPtr(pPub) into tPubPtr
+   put cnxDataPtr(pMsg) into tMsgPtr
+   put cnxDataPtr(pSig) into tSigPtr
+   unsafe
+      put _cnx_schnorr_verify(tPubPtr, tMsgPtr, tSigPtr) into tRc
+   end unsafe
+   if tRc is 0 then
+      return true
+   end if
+   return false
+end handler
+
+/* BIP-341 Taproot key-path output key: tweak a 32-byte x-only INTERNAL key to
+   the 32-byte witness-v1 OUTPUT key (both public; the script layer Bech32m-
+   wraps the result into a bc1p address). */
+public handler cxbTaprootTweak(in pXonly as Data) returns Data
+   variable tRc as Integer
+   variable tInPtr as Pointer
+   variable tOut as Pointer
+   variable tLen as Integer
+   unsafe
+      put _cnx_xonly_len() into tLen
+   end unsafe
+   cnxCheckLen(pXonly, tLen, "taproot tweak")
+   put cnxDataPtr(pXonly) into tInPtr
+   put cnxAlloc(tLen) into tOut
+   unsafe
+      put _cnx_taproot_tweak_pubkey(tInPtr, tOut) into tRc
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "taproot tweak")
+   end if
+   return cnxTake(tOut, tLen)
 end handler
 
 end library
