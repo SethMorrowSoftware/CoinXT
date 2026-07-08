@@ -47,10 +47,27 @@ function cxSelfTest
    put 0 into sPass
    put 0 into sFail
 
-   -- Gate everything on the extension + native library being loadable: if the
-   -- ABI check cannot pass, every later section would fail for the same
-   -- reason, so report the one cause and stop (the OnionXT skip discipline).
-   put cxCheckABI() into tAbi
+   -- Gate everything on BOTH layers being reachable. The cx* functions live
+   -- in src/coinxt.livecodescript, a SEPARATE script library from this stack:
+   -- if it is not loaded, a bare cxCheckABI() call raises the engine error
+   -- "Function: error in function handler, Hint: cxCheckABI" (paid for
+   -- on-engine, 2026-07-08), so probe it inside try/catch and report the
+   -- cause cleanly instead of erroring out.
+   try
+      put cxCheckABI() into tAbi
+   catch tErr
+      put "  FAIL calling cxCheckABI raised:" && tErr & return after sLog
+      put return & "SKIPPED: the cx* API is not reachable at all. This harness needs BOTH layers:" & return after sLog
+      put "  1. the packaged CoinXT extension installed (org.openxtalk.library.coinxt" & return after sLog
+      put "     with its code/<arch>-<platform>/coinxt library), and" & return after sLog
+      put "  2. src/coinxt.livecodescript loaded as a library (start using it)." & return after sLog
+      put "Load whichever is missing and rerun." & return after sLog
+      return sLog
+   end try
+   -- Both script layers are reachable; now the ABI gate proper: if the check
+   -- cannot pass (stale or missing native binary), every later section would
+   -- fail for the same reason, so report the one cause and stop (the OnionXT
+   -- skip discipline).
    if tAbi is not true then
       put "  FAIL cxCheckABI:" && tAbi & return after sLog
       put return & "SKIPPED: the CoinXT extension (org.openxtalk.library.coinxt) or its" & return after sLog
