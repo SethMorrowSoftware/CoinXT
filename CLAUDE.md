@@ -504,3 +504,18 @@ audited primitives already vendored, do NOT drag in a huge new tree.
   externally verified under ASan/UBSan and coin-kat; the `.lcb` + `cx*` + demo layer is
   transcription- and vector-locked but **NEEDS AN ON-ENGINE PASS** (add testHd/testSchnorr/testTaproot
   to the 41/41 harness run, and confirm the `optional Pointer` NULL-aux path compiles/binds on-engine).
+
+**ABI-3 on-engine pass + a Base58Check-decode bug (2026-07-08, follow-up).** The harness ran 72/74 on a
+real engine. Everything ABI-3 is now VERIFIED on-engine: `cxCheckABI` matched (extension + ABI-3 native
+library loaded and every new bind resolved, so the merged all-platform binaries are good and the
+`optional Pointer` NULL-aux Schnorr path binds), and testHd (BIP-32 xprv/xpub + path), testSchnorr
+(BIP-340 vector 0 + empty-aux default) and testTaproot (BIP-86 `bc1p`) all passed. The 2 FAILs were a
+PRE-EXISTING phase-3 bug the new decode-side test finally exercised: `cxB58Decode` looked up each char
+with `offset(char, alphabet)`, and **`the caseSensitive` defaults to FALSE**, so a lowercase Base58 digit
+matched the earlier uppercase one (`g`->`G`) and the decode produced wrong bytes (then failed its own
+checksum). Encode was unaffected (it indexes the alphabet directly). Fixed with `set the caseSensitive to
+true` in `cxB58Decode` (and defensively in `cxBase58CheckDecode`, whose 4-byte checksum compare must be
+byte-exact); transcribed 1:1 to Python to confirm the valid address now yields version 0x00 + the
+`751e76e8...` hash160 and a corrupt checksum is still rejected. Logged in the templates/CLAUDE.md living
+gotcha list (item 5.10). Lesson, again: the first time a money code-path is exercised end to end is when
+its latent bug surfaces - the decode side had shipped untested behind an encode-only address flow.
