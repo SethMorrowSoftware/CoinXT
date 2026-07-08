@@ -909,6 +909,162 @@ function cxEip712Digest pDomainSeparator, pStructHash
    return cxKeccak256(numToByte(25) & numToByte(1) & pDomainSeparator & pStructHash)
 end cxEip712Digest
 
+-- ---- BIP-322 generic signed messages (Bitcoin) ----
+--
+-- Prove you control an address by signing an arbitrary message: the message
+-- is tag-hashed, wrapped in the BIP's virtual to_spend / to_sign transaction
+-- pair, and signed exactly like a real P2WPKH spend (BIP-143); the
+-- "simple" signature is the serialized witness stack, base64. Scope: bc1q
+-- P2WPKH addresses (the common single-key case); other types are out of
+-- scope here and fail closed. Anchored in tools/coin-kat.py + the harness:
+-- the BIP's published message hashes and address reproduce, and the BIP's
+-- PUBLISHED signatures (made by Bitcoin Core) VERIFY here - Core grinds
+-- low-R nonces so its bytes differ from our plain RFC 6979 signature, but
+-- each side verifies the other, which is the interop that matters.
+
+-- the BIP-340-style tagged hash of the message
+function cxBip322Hash pMessage
+   local tTag
+   put cxSha256(textEncode("BIP0322-signed-message", "ascii")) into tTag
+   return cxSha256(tTag & tTag & pMessage)
+end cxBip322Hash
+
+-- the to_sign BIP-143 sighash for a P2WPKH program: build to_spend (spends
+-- the null outpoint with OP_0 PUSH32(message hash), pays 0 to the address's
+-- script), then hash to_sign's single input spending it (amount 0, one
+-- OP_RETURN output, everything else zero)
+private function cxBip322Sighash pH160, pMessage
+   local tSsig
+   local tSpk
+   local tToSpend
+   local tOutpoint
+   local tOuts
+   local tScriptCode
+   local tPre
+   put numToByte(0) & numToByte(32) & cxBip322Hash(pMessage) into tSsig
+   put numToByte(0) & numToByte(20) & pH160 into tSpk
+   put cxU32LE(0) & cxVarInt(1) \
+      & cxHexDecode("0000000000000000000000000000000000000000000000000000000000000000") \
+      & cxHexDecode("ffffffff") & cxVarInt(the number of bytes in tSsig) & tSsig \
+      & cxU32LE(0) & cxVarInt(1) & cxU64LE(0) \
+      & cxVarInt(the number of bytes in tSpk) & tSpk & cxU32LE(0) into tToSpend
+   put cxHash256(tToSpend) & cxU32LE(0) into tOutpoint
+   put cxU64LE(0) & cxVarInt(1) & numToByte(106) into tOuts
+   put numToByte(25) & numToByte(118) & numToByte(169) & numToByte(20) \
+      & pH160 & numToByte(136) & numToByte(172) into tScriptCode
+   put cxU32LE(0) & cxHash256(tOutpoint) & cxHash256(cxU32LE(0)) & tOutpoint \
+      & tScriptCode & cxU64LE(0) & cxU32LE(0) & cxHash256(tOuts) \
+      & cxU32LE(0) & cxU32LE(1) into tPre
+   return cxHash256(tPre)
+end cxBip322Sighash
+
+-- sign: the base64 "simple" BIP-322 signature for the key's P2WPKH address
+function cxBip322Sign pSeckey, pMessage
+   local tPub
+   local tSig
+   local tDer
+   if cxSeckeyValidate(pSeckey) is false then
+      return "CoinXT: not a valid 32-byte secret key (cxBip322Sign)"
+   end if
+   put cxPublicKey(pSeckey, true) into tPub
+   if cxIsError(tPub) then
+      return tPub && "(cxBip322Sign)"
+   end if
+   put cxSign(pSeckey, cxBip322Sighash(cxHash160(tPub), pMessage)) into tSig
+   if cxIsError(tSig) then
+      return tSig && "(cxBip322Sign)"
+   end if
+   put cxSigToDer(tSig) & numToByte(1) into tDer
+   return cxPsbtB64(numToByte(2) & cxVarInt(the number of bytes in tDer) & tDer \
+      & cxVarInt(33) & tPub)
+end cxBip322Sign
+
+-- strict-DER back to the raw 64-byte r||s (the inverse of cxSigToDer)
+private function cxDerToSig pDer
+   local tRLen
+   local tR
+   local tSLen
+   local tS
+   if byteToNum(byte 1 of pDer) is not 48 or byteToNum(byte 3 of pDer) is not 2 then
+      throw "CoinXT: not a DER signature (cxDerToSig)"
+   end if
+   put byteToNum(byte 4 of pDer) into tRLen
+   put byte 5 to (4 + tRLen) of pDer into tR
+   if byteToNum(byte (5 + tRLen) of pDer) is not 2 then
+      throw "CoinXT: not a DER signature (cxDerToSig)"
+   end if
+   put byteToNum(byte (6 + tRLen) of pDer) into tSLen
+   put byte (7 + tRLen) to (6 + tRLen + tSLen) of pDer into tS
+   -- strip the sign pad, then left-pad back to exactly 32 bytes
+   repeat while the number of bytes in tR > 1 and byteToNum(byte 1 of tR) is 0
+      delete byte 1 of tR
+   end repeat
+   repeat while the number of bytes in tS > 1 and byteToNum(byte 1 of tS) is 0
+      delete byte 1 of tS
+   end repeat
+   if the number of bytes in tR > 32 or the number of bytes in tS > 32 then
+      throw "CoinXT: DER integer too long (cxDerToSig)"
+   end if
+   repeat while the number of bytes in tR < 32
+      put numToByte(0) before tR
+   end repeat
+   repeat while the number of bytes in tS < 32
+      put numToByte(0) before tS
+   end repeat
+   return tR & tS
+end cxDerToSig
+
+-- verify a BIP-322 simple signature for a P2WPKH (bc1q/tb1q) address.
+-- Boolean, fail closed: any malformed address, witness, or signature is
+-- false, never an error a caller could mistake for success.
+function cxBip322Verify pAddress, pMessage, pSigB64
+   local tErr
+   local tDec
+   local tProg
+   local tWit
+   local tDLen
+   local tDer
+   local tPub
+   local tSig
+   try
+      put cxBech32Decode(pAddress) into tDec
+      if cxIsError(tDec) then
+         return false
+      end if
+      if line 2 of tDec is not 0 then
+         return false
+      end if
+      put line 3 to -1 of tDec into tProg
+      if the number of bytes in tProg is not 20 then
+         return false
+      end if
+      put base64Decode(pSigB64) into tWit
+      -- witness stack: 0x02, then varint DER+hashtype, then varint 33 pubkey
+      if byteToNum(byte 1 of tWit) is not 2 then
+         return false
+      end if
+      put byteToNum(byte 2 of tWit) into tDLen
+      put byte 3 to (2 + tDLen) of tWit into tDer
+      if byteToNum(byte (3 + tDLen) of tWit) is not 33 then
+         return false
+      end if
+      put byte (4 + tDLen) to (36 + tDLen) of tWit into tPub
+      if the number of bytes in tWit is not (36 + tDLen) then
+         return false
+      end if
+      if cxHash160(tPub) is not tProg then
+         return false
+      end if
+      if byteToNum(byte -1 of tDer) is not 1 then
+         return false
+      end if
+      put cxDerToSig(byte 1 to -2 of tDer) into tSig
+      return cxVerify(tPub, cxBip322Sighash(tProg, pMessage), tSig) is true
+   catch tErr
+      return false
+   end try
+end cxBip322Verify
+
 -- ---- Bitcoin addresses ----
 
 -- legacy P2PKH: Base58Check( version || hash160(pubkey) ). pMainnet defaults true.
