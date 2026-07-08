@@ -41,7 +41,7 @@ function cxCheckABI
    try
       cxbCheckABI
    catch tErr
-      return tErr && "(cxCheckABI)"
+      return cxMakeError(tErr, "(cxCheckABI)")
    end try
    return true
 end cxCheckABI
@@ -50,6 +50,29 @@ end cxCheckABI
 function cxIsError pValue
    return pValue begins with "CoinXT:"
 end cxIsError
+
+-- Normalize a caught error to the "CoinXT: ..." contract. CONFIRMED
+-- ON-ENGINE (2026-07-08): an error thrown inside an LCB extension handler
+-- reaches a livecodescript catch variable as the engine's STRUCTURED
+-- execution-error list (comma-separated code,line,column,hint lines), with
+-- our thrown "CoinXT: ..." text embedded as a hint field, NOT as the
+-- verbatim thrown string (a script-level throw DOES arrive verbatim). So:
+-- pass a verbatim message through, dig our message out of a structured
+-- list, and wrap anything else so the caller still sees a CoinXT: error.
+private function cxMakeError pErr, pWhere
+   local tPos
+   local tMsg
+   if pErr begins with "CoinXT:" then
+      return pErr && pWhere
+   end if
+   put offset("CoinXT:", pErr) into tPos
+   if tPos > 0 then
+      put char tPos to -1 of pErr into tMsg
+      -- keep only OUR message line; the engine stacks more error lines below
+      return line 1 of tMsg && pWhere
+   end if
+   return "CoinXT: unexpected engine error:" && line 1 of pErr && pWhere
+end cxMakeError
 
 ----------------------------------------------------------------------
 -- hashes (Data in, Data out)
@@ -61,7 +84,7 @@ function cxKeccak256 pData
    try
       put cxbKeccak256(pData) into tOut
    catch tErr
-      return tErr && "(cxKeccak256)"
+      return cxMakeError(tErr, "(cxKeccak256)")
    end try
    return tOut
 end cxKeccak256
@@ -72,7 +95,7 @@ function cxSha3_256 pData
    try
       put cxbSha3_256(pData) into tOut
    catch tErr
-      return tErr && "(cxSha3_256)"
+      return cxMakeError(tErr, "(cxSha3_256)")
    end try
    return tOut
 end cxSha3_256
@@ -82,7 +105,7 @@ function cxSha256 pData
    try
       put cxbSha256(pData) into tOut
    catch tErr
-      return tErr && "(cxSha256)"
+      return cxMakeError(tErr, "(cxSha256)")
    end try
    return tOut
 end cxSha256
@@ -92,7 +115,7 @@ function cxSha512 pData
    try
       put cxbSha512(pData) into tOut
    catch tErr
-      return tErr && "(cxSha512)"
+      return cxMakeError(tErr, "(cxSha512)")
    end try
    return tOut
 end cxSha512
@@ -102,7 +125,7 @@ function cxRipemd160 pData
    try
       put cxbRipemd160(pData) into tOut
    catch tErr
-      return tErr && "(cxRipemd160)"
+      return cxMakeError(tErr, "(cxRipemd160)")
    end try
    return tOut
 end cxRipemd160
@@ -113,7 +136,7 @@ function cxHash160 pData
    try
       put cxbRipemd160(cxbSha256(pData)) into tOut
    catch tErr
-      return tErr && "(cxHash160)"
+      return cxMakeError(tErr, "(cxHash160)")
    end try
    return tOut
 end cxHash160
@@ -124,7 +147,7 @@ function cxHash256 pData
    try
       put cxbSha256(cxbSha256(pData)) into tOut
    catch tErr
-      return tErr && "(cxHash256)"
+      return cxMakeError(tErr, "(cxHash256)")
    end try
    return tOut
 end cxHash256
@@ -135,7 +158,7 @@ function cxHmacSha256 pKey, pMsg
       put cxbHmacSha256(pKey, pMsg) into tOut
    catch tErr
       put empty into pKey
-      return tErr && "(cxHmacSha256)"
+      return cxMakeError(tErr, "(cxHmacSha256)")
    end try
    put empty into pKey
    return tOut
@@ -147,7 +170,7 @@ function cxHmacSha512 pKey, pMsg
       put cxbHmacSha512(pKey, pMsg) into tOut
    catch tErr
       put empty into pKey
-      return tErr && "(cxHmacSha512)"
+      return cxMakeError(tErr, "(cxHmacSha512)")
    end try
    put empty into pKey
    return tOut
@@ -162,7 +185,7 @@ function cxPbkdf2HmacSha512 pPassword, pSalt, pIterations, pOutLen
       put cxbPbkdf2HmacSha512(pPassword, pSalt, pIterations, pOutLen) into tOut
    catch tErr
       put empty into pPassword
-      return tErr && "(cxPbkdf2HmacSha512)"
+      return cxMakeError(tErr, "(cxPbkdf2HmacSha512)")
    end try
    put empty into pPassword
    return tOut
@@ -183,7 +206,7 @@ function cxNewSeckey pEntropy
       put cxbSeckeyVerify(pEntropy) into tOk
    catch tErr
       put empty into pEntropy
-      return tErr && "(cxNewSeckey)"
+      return cxMakeError(tErr, "(cxNewSeckey)")
    end try
    if tOk then
       return pEntropy
@@ -216,7 +239,7 @@ function cxPublicKey pSeckey, pCompressed
       put cxbPubkeyFromSeckey(pSeckey, pCompressed) into tOut
    catch tErr
       put empty into pSeckey
-      return tErr && "(cxPublicKey)"
+      return cxMakeError(tErr, "(cxPublicKey)")
    end try
    put empty into pSeckey
    return tOut
@@ -229,7 +252,7 @@ function cxPubkeyDecompress pPubkey
    try
       put cxbPubkeyDecompress(pPubkey) into tOut
    catch tErr
-      return tErr && "(cxPubkeyDecompress)"
+      return cxMakeError(tErr, "(cxPubkeyDecompress)")
    end try
    return tOut
 end cxPubkeyDecompress
@@ -244,7 +267,7 @@ function cxSign pSeckey, pHash32
       put cxbEcdsaSign(pSeckey, pHash32) into tOut
    catch tErr
       put empty into pSeckey
-      return tErr && "(cxSign)"
+      return cxMakeError(tErr, "(cxSign)")
    end try
    put empty into pSeckey
    return tOut
@@ -271,7 +294,7 @@ function cxSignRecoverable pSeckey, pHash32
       put cxbEcdsaSignRecoverable(pSeckey, pHash32) into tOut
    catch tErr
       put empty into pSeckey
-      return tErr && "(cxSignRecoverable)"
+      return cxMakeError(tErr, "(cxSignRecoverable)")
    end try
    put empty into pSeckey
    return tOut
@@ -285,7 +308,7 @@ function cxRecover pSig65, pHash32
    try
       put cxbEcdsaRecover(pSig65, pHash32) into tOut
    catch tErr
-      return tErr && "(cxRecover)"
+      return cxMakeError(tErr, "(cxRecover)")
    end try
    return tOut
 end cxRecover
@@ -300,7 +323,7 @@ function cxEcdh pSeckey, pPubkey
       put cxbEcdh(pSeckey, pPubkey) into tOut
    catch tErr
       put empty into pSeckey
-      return tErr && "(cxEcdh)"
+      return cxMakeError(tErr, "(cxEcdh)")
    end try
    put empty into pSeckey
    return tOut

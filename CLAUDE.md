@@ -373,3 +373,28 @@ and example machinery forward to the SodiumXT / TorrentXT shape, after reading b
   stack (sodium-demo pattern: palette, prefix:role control names, one mouseUp router); its keys are
   loudly PUBLIC (the "correct horse battery staple" derivation) with optional SodiumXT entropy,
   capability-gated by try/catch. Both pass the static gate; both NEED AN ON-ENGINE PASS.
+
+**FIRST ON-ENGINE PASS (2026-07-08): the whole native + FFI + script stack VERIFIED on a real
+engine.** The harness's first full run reported 36 ok / 5 FAIL, and the 36 settle every open
+question that mattered:
+
+- **VERIFY promoted to fact:** the packaged extension loads, the `"c:coinxt>"` binds resolve against
+  `code/<arch>-<platform>/coinxt.<ext>` (cxCheckABI passed: extension + native library + ABI 2
+  match); the MinGW-built Windows binary works as shipped (imports only bcrypt/KERNEL32/msvcrt,
+  verified by inspection AND by running); the empty-Data sentinel path works (`keccak256(empty)`
+  matched its vector); and EVERY crypto path is byte-exact through all three layers on-engine:
+  Keccak/SHA-2/SHA-3/RIPEMD/hash160/hash256, RFC 4231 HMAC, the BIP-39-shaped PBKDF2, seckey
+  range edges, pubkey(1) == G both forms, decompress round trip, the classic RFC 6979 signature
+  (low-s, deterministic, verifies under both pubkey forms), corrupt-signature rejection, ecrecover
+  round trip (wrong recid rejected), and the pinned ECDH x-coordinate (symmetric across forms).
+- The 5 FAILs were ONE bug, in the script layer's error contract: an error thrown inside an LCB
+  handler reaches a livecodescript catch variable as the engine's STRUCTURED execution-error list
+  (code,line,column,hint lines) with our "CoinXT: ..." text embedded as a hint, NOT verbatim (only
+  script-level throws arrive verbatim), so `cxIsError`'s `begins with` test missed it. Fixed by
+  normalizing at every catch site (`cxMakeError` in coinxt.livecodescript); recorded in the
+  templates/CLAUDE.md living log. Needs one re-run to confirm 41/41.
+- Two more paid-for-on-engine lessons from the same pass, both logged and gated where possible:
+  livecodescript constants are declared with `=` (the `is` form is LCB-only; checker-gated), and
+  calling a function in a not-yet-loaded sibling script library raises "Function: error in function
+  handler" with the function name as hint (the examples now preflight inside try/catch and say
+  which layer is missing).

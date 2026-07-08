@@ -190,11 +190,18 @@ on buildUI
    makeLabel "ui:subtitle", "26,40,600,60", "Bitcoin and Ethereum crypto primitives for xTalk", "headerSub", 12, "plain"
    makeLabel "ui:ver", "560,16,800,40", "", "headerSub", 12, "plain"
    set the textAlign of field "ui:ver" to "right"
-   if cxCheckABI() is true then
-      put "native library loaded (ABI ok)" into field "ui:ver"
-   else
-      put "library NOT loaded" into field "ui:ver"
-   end if
+   -- cxCheckABI lives in src/coinxt.livecodescript, a separate library; if
+   -- that is not loaded the bare call raises an engine error, so probe it
+   -- inside try/catch (the same lesson as the tests harness)
+   try
+      if cxCheckABI() is true then
+         put "native library loaded (ABI ok)" into field "ui:ver"
+      else
+         put "native library NOT loaded" into field "ui:ver"
+      end if
+   catch tErr
+      put "cx* script library not loaded" into field "ui:ver"
+   end try
 
    -- Tab bar.
    makeButton "ui:tabKeys", "24,76,128,104", "Keys", false
