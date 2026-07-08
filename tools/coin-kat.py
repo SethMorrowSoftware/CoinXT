@@ -1488,6 +1488,292 @@ def run_btc_tx_checks(lib, kat):
 
 
 # ---------------------------------------------------------------------------
+# PSBT (BIP-174), the cold-signer surface. Mirrors of cxPsbtDecode/Sign/
+# Finalize's algorithms, anchored three ways: (a) the OFFICIAL BIP-174
+# creator vector parses and re-encodes BYTE-EXACT; (b) a PSBT built for the
+# official BIP-143 example signs to the BIP's published DER and extracts the
+# BIP's published raw tx; (c) an HD-signing PSBT (BIP32_DERIVATION walk from
+# the canonical mnemonic's master, fingerprint 73c5da0a) signs and extracts
+# a deterministic raw tx. The base64 constants here are the SAME strings the
+# on-engine harness pins, so the two cannot drift.
+PSBT_CREATOR_B64 = (
+    "cHNidP8BAJoCAAAAAljoeiG1ba8MI76OcHBFbDNvfLqlyHV5JPVFiHuyq911AAAAAAD/////"
+    "g40EJ9DsZQpoqka7CwmK6kQiwHGyyng1Kgd5WdB86h0BAAAAAP////8CcKrwCAAAAAAWABTY"
+    "XCtx0AYLCcmIauuBXlCZHdoSTQDh9QUAAAAAFgAUAK6pouXw+HaliN9VRuh0LR2HAI8AAAAA"
+    "AAAAAAA=")
+PSBT143_IN_B64 = (
+    "cHNidP8BAHcBAAAAAdtrGyCqD9eyOIC+LsvUqYEwl0z0dI+2YJKsTTzrGlR3AQAAAAD+////"
+    "Ari06wsAAAAAGXapFKRXtoTX8NU5pGpFu8BD81tZ0NljiKwACK8vAAAAABl2qRT9Jwse5qvK"
+    "6pf+p60EAui9itbXfIiskgQAAAABASAAypo7AAAAABepFEcz83z024b7wu/tJQC09OSfMSAj"
+    "hwEDBAEAAAABBBYAFHkJGXIYbESesd7SK3jkDQCb3wCJAAAA")
+PSBT143_SIGNED_B64 = (
+    "cHNidP8BAHcBAAAAAdtrGyCqD9eyOIC+LsvUqYEwl0z0dI+2YJKsTTzrGlR3AQAAAAD+////"
+    "Ari06wsAAAAAGXapFKRXtoTX8NU5pGpFu8BD81tZ0NljiKwACK8vAAAAABl2qRT9Jwse5qvK"
+    "6pf+p60EAui9itbXfIiskgQAAAABASAAypo7AAAAABepFEcz83z024b7wu/tJQC09OSfMSAj"
+    "hyICA60djokhLwuSx00ju3EMAGYq0UcBmKxIxD99b5OiomhzRzBEAiBHrI6Hg1LT673hyUzj"
+    "oQ0FfCQXV0cRb4KI5deU0S1ILwIgIX82pIXK6QPHEzMdh3wfZGd+NiKtQBByaHBUBlb+ncsB"
+    "AQMEAQAAAAEEFgAUeQkZchhsRJ6x3tIreOQNAJvfAIkAAAA=")
+PSBT_HD_B64 = (
+    "cHNidP8BAFICAAAAAaqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqAAAAAAD9////"
+    "AZBfAQAAAAAAFgAUdR526BmRltRUlBxF0bOjI/FDO9YAAAAAAAEBH6CGAQAAAAAAFgAUwM68"
+    "1sPTyox13F7GLr5VMw75EOIiBgMw1U/Q3UIKbl+NNiT180gsrjUPedXwdTv1vu+cLZGvPBhz"
+    "xdoKVAAAgAAAAIAAAACAAAAAAAAAAAAAAA==")
+PSBT_HD_TXID = \
+    "28257a9a303b3eb63c4366754ac0905a9b73548e6a3158c86e408bdf018cff85"
+PSBT_HD_RAW = (
+    "02000000000101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    "aaaaaaaa0000000000fdffffff01905f010000000000160014751e76e8199196d45494"
+    "1c45d1b3a323f1433bd602483045022100cae928967fc76aa2e058328d58d824f58472"
+    "fe659066dc6aa9c5ba2449b4359c02201f202c8eb5dfe810a28e465c68d260ec6c263b"
+    "e7acb42e528fb4bda055a7dc1001210330d54fd0dd420a6e5f8d3624f5f3482cae350f"
+    "79d5f0753bf5beef9c2d91af3c00000000")
+PSBT_MASTER_FP = "73c5da0a"
+
+
+def _p_varint(n):
+    if n < 0xFD:
+        return bytes([n])
+    if n <= 0xFFFF:
+        return b"\xfd" + n.to_bytes(2, "little")
+    return b"\xfe" + n.to_bytes(4, "little")
+
+
+def _p_rd_varint(f):
+    import io as _io
+    n = f.read(1)[0]
+    if n < 0xFD:
+        return n
+    if n == 0xFD:
+        return int.from_bytes(f.read(2), "little")
+    return int.from_bytes(f.read(4), "little")
+
+
+def _p_parse_tx(raw):
+    import io
+    f = io.BytesIO(raw)
+    version = int.from_bytes(f.read(4), "little")
+    nin = _p_rd_varint(f)
+    witness = False
+    if nin == 0:
+        assert f.read(1) == b"\x01"
+        witness = True
+        nin = _p_rd_varint(f)
+    ins = []
+    for _ in range(nin):
+        t = f.read(32)
+        vout = int.from_bytes(f.read(4), "little")
+        ssig = f.read(_p_rd_varint(f))
+        seq = int.from_bytes(f.read(4), "little")
+        ins.append((t, vout, ssig, seq))
+    outs = []
+    for _ in range(_p_rd_varint(f)):
+        v = int.from_bytes(f.read(8), "little")
+        outs.append((v, f.read(_p_rd_varint(f))))
+    if witness:
+        for _ in range(nin):
+            for _ in range(_p_rd_varint(f)):
+                f.read(_p_rd_varint(f))
+    locktime = int.from_bytes(f.read(4), "little")
+    return version, ins, outs, locktime
+
+
+def _p_parse(raw):
+    import io
+    assert raw[:5] == b"psbt\xff"
+    f = io.BytesIO(raw[5:])
+
+    def rd_map():
+        entries = []
+        while True:
+            klen = _p_rd_varint(f)
+            if klen == 0:
+                return entries
+            k = f.read(klen)
+            entries.append((k, f.read(_p_rd_varint(f))))
+    g = rd_map()
+    unsigned = dict((k[0], v) for k, v in g)[0x00]
+    _, ins, outs, _ = _p_parse_tx(unsigned)
+    imaps = [rd_map() for _ in range(len(ins))]
+    omaps = [rd_map() for _ in range(len(outs))]
+    assert f.read() == b""
+    return g, imaps, omaps, unsigned
+
+
+def _p_serialize(g, imaps, omaps):
+    out = b"psbt\xff"
+    for m in [g] + imaps + omaps:
+        for k, v in m:
+            out += _p_varint(len(k)) + k + _p_varint(len(v)) + v
+        out += b"\x00"
+    return out
+
+
+def _p_entry(m, t):
+    for k, v in m:
+        if len(k) == 1 and k[0] == t:
+            return v
+    return None
+
+
+def _p_digest(unsigned, idx, prog, amount):
+    version, ins, outs, locktime = _p_parse_tx(unsigned)
+    prevouts = b"".join(t + v.to_bytes(4, "little") for t, v, _, _ in ins)
+    seqs = b"".join(s.to_bytes(4, "little") for _, _, _, s in ins)
+    outputs = b"".join(v.to_bytes(8, "little") + _p_varint(len(s)) + s
+                       for v, s in outs)
+    t, v, _, seq = ins[idx]
+    pre = (version.to_bytes(4, "little") + _dsha(prevouts) + _dsha(seqs)
+           + t + v.to_bytes(4, "little")
+           + b"\x19\x76\xa9\x14" + prog + b"\x88\xac"
+           + amount.to_bytes(8, "little") + seq.to_bytes(4, "little")
+           + _dsha(outputs) + locktime.to_bytes(4, "little")
+           + (1).to_bytes(4, "little"))
+    return _dsha(pre)
+
+
+def _p_input_prog(m):
+    """(prog_h160, nested, spk, amount) for a single-key segwit input."""
+    wu = _p_entry(m, 0x01)
+    if wu is None:
+        return None, False, None, None
+    amount = int.from_bytes(wu[:8], "little")
+    spk = wu[9:]
+    if len(spk) == 22 and spk[:2] == b"\x00\x14":
+        return spk[2:], False, spk, amount
+    if len(spk) == 23 and spk[0] == 0xA9 and spk[-1] == 0x87:
+        r = _p_entry(m, 0x04)
+        if r is not None and len(r) == 22 and r[:2] == b"\x00\x14" \
+                and _h160(r) == spk[2:22]:
+            return r[2:], True, spk, amount
+    return None, False, spk, amount
+
+
+def _p_sign(lib, raw, key):
+    """Mirror of cxPsbtSign: key = 32-byte seckey or 73-byte HD blob."""
+    g, imaps, omaps, unsigned = _p_parse(raw)
+    for i, m in enumerate(imaps):
+        st = _p_entry(m, 0x03)
+        if st is not None and int.from_bytes(st, "little") != 1:
+            continue
+        prog, nested, spk, amount = _p_input_prog(m)
+        if prog is None:
+            continue
+        sk = None
+        if len(key) == 32:
+            if _h160(pubkey(lib, key, True)) == prog:
+                sk = key
+        else:
+            fp = _h160(pubkey(lib, key[41:73], True))[:4]
+            for k, v in m:
+                if len(k) != 34 or k[0] != 0x06 or v[:4] != fp:
+                    continue
+                node = key
+                for j in range(4, len(v), 4):
+                    n = int.from_bytes(v[j:j + 4], "little")
+                    child = ctypes.create_string_buffer(73)
+                    lib.cnx_hdnode_derive(node, n & 0x7FFFFFFF,
+                                          1 if n >= 0x80000000 else 0, child)
+                    node = child.raw
+                if pubkey(lib, node[41:73], True) == k[1:] \
+                        and _h160(k[1:]) == prog:
+                    sk = node[41:73]
+                    break
+        if sk is None:
+            continue
+        pub = pubkey(lib, sk, True)
+        if any(len(k) == 34 and k[0] == 0x02 and k[1:] == pub for k, _ in m):
+            continue
+        digest = _p_digest(unsigned, i, prog, amount)
+        sig = ctypes.create_string_buffer(64)
+        assert lib.cnx_ecdsa_sign(sk, digest, sig) == 0
+        pos = 0
+        for j, (k, _) in enumerate(m):
+            if k[0] <= 0x02:
+                pos = j + 1
+        m.insert(pos, (b"\x02" + pub, _sig_to_der(sig.raw) + b"\x01"))
+    return _p_serialize(g, imaps, omaps)
+
+
+def _p_finalize(raw):
+    """Mirror of cxPsbtFinalize: returns (txid_hex, raw_tx_bytes)."""
+    g, imaps, _, unsigned = _p_parse(raw)
+    version, ins, outs, locktime = _p_parse_tx(unsigned)
+    body_ins, wits = b"", b""
+    for i, m in enumerate(imaps):
+        prog, nested, _, _ = _p_input_prog(m)
+        assert prog is not None, f"input {i} not single-key segwit"
+        der = None
+        for k, v in m:
+            if len(k) == 34 and k[0] == 0x02 and _h160(k[1:]) == prog:
+                pub, der = k[1:], v
+                break
+        assert der is not None, f"input {i} missing signature"
+        ssig = (_p_varint(22) + b"\x00\x14" + prog) if nested else b""
+        t, v, _, seq = ins[i]
+        body_ins += (t + v.to_bytes(4, "little") + _p_varint(len(ssig))
+                     + ssig + seq.to_bytes(4, "little"))
+        wits += b"\x02" + _p_varint(len(der)) + der + b"\x21" + pub
+    body_ins = _p_varint(len(ins)) + body_ins
+    body_outs = _p_varint(len(outs)) + b"".join(
+        v.to_bytes(8, "little") + _p_varint(len(s)) + s for v, s in outs)
+    raw_tx = (version.to_bytes(4, "little") + b"\x00\x01" + body_ins
+              + body_outs + wits + locktime.to_bytes(4, "little"))
+    stripped = (version.to_bytes(4, "little") + body_ins + body_outs
+                + locktime.to_bytes(4, "little"))
+    return _dsha(stripped)[::-1].hex(), raw_tx
+
+
+def run_psbt_checks(lib, kat):
+    import base64
+    # (a) the official creator vector re-encodes byte-exact
+    raw = base64.b64decode(PSBT_CREATOR_B64)
+    g, im, om, _ = _p_parse(raw)
+    kat.check("PSBT official creator vector re-encodes byte-exact",
+              _p_serialize(g, im, om) == raw)
+    # (b) the BIP-143 example as a PSBT: construct, pin, sign, finalize
+    pub = pubkey(lib, BIP143_KEY, True)
+    redeem = b"\x00\x14" + _h160(pub)
+    spk = b"\xa9\x14" + _h160(redeem) + b"\x87"
+    wu = ((1000000000).to_bytes(8, "little") + _p_varint(len(spk)) + spk)
+    unsigned = bytes.fromhex(
+        "0100000001db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb"
+        "1a54770100000000feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a4"
+        "6a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97"
+        "fea7ad0402e8bd8ad6d77c88ac92040000")
+    built = _p_serialize([(b"\x00", unsigned)],
+                         [[(b"\x01", wu), (b"\x03", (1).to_bytes(4, "little")),
+                           (b"\x04", redeem)]], [[], []])
+    kat.check("PSBT of the BIP-143 example matches the pinned base64",
+              base64.b64encode(built).decode() == PSBT143_IN_B64)
+    signed = _p_sign(lib, built, BIP143_KEY)
+    kat.check("signing it matches the pinned signed base64",
+              base64.b64encode(signed).decode() == PSBT143_SIGNED_B64)
+    psig = [v for k, v in _p_parse(signed)[1][0] if k[0] == 0x02][0]
+    kat.check("the partial sig is the BIP's published DER",
+              psig.hex() == BIP143_DER + "01")
+    txid, raw_tx = _p_finalize(signed)
+    kat.check("finalize extracts the BIP's published raw tx",
+              raw_tx.hex() == BIP143_RAW)
+    kat.check("finalized txid", txid == BIP143_NEW_TXID, txid)
+    kat.check("an unrelated key leaves the PSBT byte-identical",
+              _p_sign(lib, built, sk_bytes(1)) == built)
+    # (c) HD signing from the canonical mnemonic via BIP32_DERIVATION
+    seed = hashlib.pbkdf2_hmac("sha512", RESTORE_MNEMONIC.encode("ascii"),
+                               b"mnemonic", 2048, 64)
+    master = ctypes.create_string_buffer(73)
+    lib.cnx_hdnode_from_seed(seed, len(seed), master)
+    master = master.raw
+    kat.check("master fingerprint of the canonical mnemonic",
+              _h160(pubkey(lib, master[41:73], True))[:4].hex() == PSBT_MASTER_FP)
+    hd_raw = base64.b64decode(PSBT_HD_B64)
+    signed_hd = _p_sign(lib, hd_raw, master)
+    txid_hd, raw_hd = _p_finalize(signed_hd)
+    kat.check("HD-signed PSBT extracts the pinned raw tx",
+              raw_hd.hex() == PSBT_HD_RAW, raw_hd.hex())
+    kat.check("HD txid", txid_hd == PSBT_HD_TXID, txid_hd)
+
+
+# ---------------------------------------------------------------------------
 # The wallet-restore path (the demo's headline feature): the canonical BIP-39
 # test mnemonic restores, through the SHIM's real HD-node derivation, to the
 # OFFICIAL BIP-84 and BIP-86 first addresses (those two strings are printed
@@ -1604,6 +1890,7 @@ def main(argv):
         run_phase5_encoder_checks(lib, kat)
         run_rlp_eip155_checks(lib, kat)
         run_btc_tx_checks(lib, kat)
+        run_psbt_checks(lib, kat)
         run_restore_checks(lib, kat)
 
     if kat.problems:

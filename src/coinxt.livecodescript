@@ -1355,6 +1355,697 @@ function cxBtcTxSignP2WPKH pSeckey, pTxid, pVout, pAmountSats, pOutputs, pNested
       & cxHexEncode(tSighash) & return & tRaw
 end cxBtcTxSignP2WPKH
 
+-- ---- PSBT (BIP-174): the cold-signer surface ----
+--
+-- Parse, inspect, SIGN, and finalize Partially Signed Bitcoin Transactions,
+-- the interchange format Sparrow / Electrum / Core speak, so CoinXT works
+-- as an air-gapped signer. Scope, stated honestly: the signer adds
+-- SIGHASH_ALL partial signatures for single-key SegWit inputs (native
+-- P2WPKH and BIP-49 nested P2SH-P2WPKH), by direct key or by walking the
+-- PSBT's BIP32_DERIVATION entries from an HD master node; multisig, legacy
+-- P2PKH, and Taproot inputs are decoded and reported but not signed (yet).
+-- Internal helpers THROW "CoinXT: ..." (a script-level throw arrives
+-- verbatim in catch); the three public functions catch and return the
+-- error-string contract. Anchored in tools/coin-kat.py + the harness: the
+-- official BIP-174 vector re-encodes byte-exact, and a PSBT of the official
+-- BIP-143 example signs to the BIP's published DER and extracts the BIP's
+-- published raw transaction.
+
+-- normalize base64 (Sparrow/Core export) or hex to raw PSBT bytes
+private function cxPsbtBytes pIn
+   local tS
+   local tRaw
+   put pIn into tS
+   replace return with empty in tS
+   replace space with empty in tS
+   replace tab with empty in tS
+   if matchText(tS, "^[0-9a-fA-F]+$") and tS begins with "70736274" then
+      put cxHexDecode(tS) into tRaw
+   else
+      put base64Decode(tS) into tRaw
+   end if
+   if cxHexEncode(byte 1 to 5 of tRaw) is not "70736274ff" then
+      throw "CoinXT: not a PSBT (bad magic) (cxPsbtBytes)"
+   end if
+   return tRaw
+end cxPsbtBytes
+
+-- single-line base64 (the engine's base64Encode wraps lines; strip that)
+private function cxPsbtB64 pData
+   local tOut
+   put base64Encode(pData) into tOut
+   replace return with empty in tOut
+   return tOut
+end cxPsbtB64
+
+-- read a Bitcoin varint at 1-based pPos; returns "value,nextpos"
+private function cxRdVarInt pData, pPos
+   local tB
+   local tVal
+   if pPos > the number of bytes in pData then
+      throw "CoinXT: truncated data (cxRdVarInt)"
+   end if
+   put byteToNum(byte pPos of pData) into tB
+   if tB < 253 then
+      return tB & comma & (pPos + 1)
+   end if
+   if tB is 253 then
+      put byteToNum(byte (pPos + 1) of pData) + \
+         (byteToNum(byte (pPos + 2) of pData) * 256) into tVal
+      return tVal & comma & (pPos + 3)
+   end if
+   if tB is 254 then
+      put cxRdU32(pData, pPos + 1) into tVal
+      return tVal & comma & (pPos + 5)
+   end if
+   throw "CoinXT: 8-byte varint not supported (cxRdVarInt)"
+end cxRdVarInt
+
+-- little-endian readers (1-based offsets)
+private function cxRdU32 pData, pPos
+   return byteToNum(byte pPos of pData) \
+      + (byteToNum(byte (pPos + 1) of pData) * 256) \
+      + (byteToNum(byte (pPos + 2) of pData) * 65536) \
+      + (byteToNum(byte (pPos + 3) of pData) * 16777216)
+end cxRdU32
+
+-- 8-byte LE amount; anything at or above 2^48 sats (past 21M BTC) is
+-- refused so the value always stays in the exact-integer range
+private function cxRdU64 pData, pPos
+   local tVal
+   local tI
+   if byteToNum(byte (pPos + 6) of pData) is not 0 or byteToNum(byte (pPos + 7) of pData) is not 0 then
+      throw "CoinXT: amount out of range (cxRdU64)"
+   end if
+   put 0 into tVal
+   repeat with tI = 5 down to 0
+      put (tVal * 256) + byteToNum(byte (pPos + tI) of pData) into tVal
+   end repeat
+   return tVal
+end cxRdU64
+
+-- parse a transaction (legacy or witness serialization) to an array:
+-- version / nin / in[i][txidle,vout,ssig,seq] / nout / out[i][value,spk] /
+-- locktime / witness
+private function cxTxParse pRaw
+   local tTx
+   local tPos
+   local tPair
+   local tNin
+   local tI
+   local tJ
+   local tLen
+   local tCount
+   put cxRdU32(pRaw, 1) into tTx["version"]
+   put 5 into tPos
+   put cxRdVarInt(pRaw, tPos) into tPair
+   put item 1 of tPair into tNin
+   put item 2 of tPair into tPos
+   put false into tTx["witness"]
+   if tNin is 0 then
+      if byteToNum(byte tPos of pRaw) is not 1 then
+         throw "CoinXT: bad witness marker (cxTxParse)"
+      end if
+      put true into tTx["witness"]
+      add 1 to tPos
+      put cxRdVarInt(pRaw, tPos) into tPair
+      put item 1 of tPair into tNin
+      put item 2 of tPair into tPos
+   end if
+   put tNin into tTx["nin"]
+   repeat with tI = 1 to tNin
+      put byte tPos to (tPos + 31) of pRaw into tTx["in"][tI]["txidle"]
+      put cxRdU32(pRaw, tPos + 32) into tTx["in"][tI]["vout"]
+      add 36 to tPos
+      put cxRdVarInt(pRaw, tPos) into tPair
+      put item 1 of tPair into tLen
+      put item 2 of tPair into tPos
+      if tLen > 0 then
+         put byte tPos to (tPos + tLen - 1) of pRaw into tTx["in"][tI]["ssig"]
+      else
+         put empty into tTx["in"][tI]["ssig"]
+      end if
+      add tLen to tPos
+      put cxRdU32(pRaw, tPos) into tTx["in"][tI]["seq"]
+      add 4 to tPos
+   end repeat
+   put cxRdVarInt(pRaw, tPos) into tPair
+   put item 1 of tPair into tTx["nout"]
+   put item 2 of tPair into tPos
+   repeat with tI = 1 to tTx["nout"]
+      put cxRdU64(pRaw, tPos) into tTx["out"][tI]["value"]
+      add 8 to tPos
+      put cxRdVarInt(pRaw, tPos) into tPair
+      put item 1 of tPair into tLen
+      put item 2 of tPair into tPos
+      put byte tPos to (tPos + tLen - 1) of pRaw into tTx["out"][tI]["spk"]
+      add tLen to tPos
+   end repeat
+   if tTx["witness"] then
+      repeat with tI = 1 to tNin
+         put cxRdVarInt(pRaw, tPos) into tPair
+         put item 1 of tPair into tCount
+         put item 2 of tPair into tPos
+         repeat with tJ = 1 to tCount
+            put cxRdVarInt(pRaw, tPos) into tPair
+            put item 1 of tPair into tLen
+            put item 2 of tPair into tPos
+            add tLen to tPos
+         end repeat
+      end repeat
+   end if
+   put cxRdU32(pRaw, tPos) into tTx["locktime"]
+   add 4 to tPos
+   if tPos is not (the number of bytes in pRaw + 1) then
+      throw "CoinXT: transaction has trailing bytes (cxTxParse)"
+   end if
+   return tTx
+end cxTxParse
+
+-- read one PSBT key-value map at pPos: [j][k/v], [n] entries, [next] offset
+private function cxPsbtRdMap pRaw, pPos
+   local tM
+   local tPair
+   local tKLen
+   local tVLen
+   local tJ
+   local tPos2
+   put pPos into tPos2
+   put 0 into tJ
+   repeat forever
+      put cxRdVarInt(pRaw, tPos2) into tPair
+      put item 1 of tPair into tKLen
+      put item 2 of tPair into tPos2
+      if tKLen is 0 then
+         exit repeat
+      end if
+      add 1 to tJ
+      put byte tPos2 to (tPos2 + tKLen - 1) of pRaw into tM[tJ]["k"]
+      add tKLen to tPos2
+      put cxRdVarInt(pRaw, tPos2) into tPair
+      put item 1 of tPair into tVLen
+      put item 2 of tPair into tPos2
+      if tVLen > 0 then
+         put byte tPos2 to (tPos2 + tVLen - 1) of pRaw into tM[tJ]["v"]
+      else
+         put empty into tM[tJ]["v"]
+      end if
+      add tVLen to tPos2
+   end repeat
+   put tJ into tM["n"]
+   put tPos2 into tM["next"]
+   return tM
+end cxPsbtRdMap
+
+-- whole-PSBT parse: g / in[i] / out[i] maps + the parsed unsigned tx
+private function cxPsbtParse pRaw
+   local tP
+   local tPos
+   local tJ
+   local tI
+   local tUnsigned
+   if cxHexEncode(byte 1 to 5 of pRaw) is not "70736274ff" then
+      throw "CoinXT: not a PSBT (bad magic) (cxPsbtParse)"
+   end if
+   put cxPsbtRdMap(pRaw, 6) into tP["g"]
+   put tP["g"]["next"] into tPos
+   put empty into tUnsigned
+   repeat with tJ = 1 to tP["g"]["n"]
+      if the number of bytes in tP["g"][tJ]["k"] is 1 and byteToNum(byte 1 of tP["g"][tJ]["k"]) is 0 then
+         put tP["g"][tJ]["v"] into tUnsigned
+      end if
+   end repeat
+   if tUnsigned is empty then
+      throw "CoinXT: PSBT has no unsigned transaction (cxPsbtParse)"
+   end if
+   put tUnsigned into tP["txraw"]
+   put cxTxParse(tUnsigned) into tP["txa"]
+   repeat with tI = 1 to tP["txa"]["nin"]
+      put cxPsbtRdMap(pRaw, tPos) into tP["in"][tI]
+      put tP["in"][tI]["next"] into tPos
+   end repeat
+   repeat with tI = 1 to tP["txa"]["nout"]
+      put cxPsbtRdMap(pRaw, tPos) into tP["out"][tI]
+      put tP["out"][tI]["next"] into tPos
+   end repeat
+   if tPos is not (the number of bytes in pRaw + 1) then
+      throw "CoinXT: PSBT has trailing bytes (cxPsbtParse)"
+   end if
+   return tP
+end cxPsbtParse
+
+-- serialize one map (entries in stored order + the 0x00 terminator)
+private function cxPsbtSerMap pM
+   local tOut
+   local tJ
+   put empty into tOut
+   repeat with tJ = 1 to pM["n"]
+      put cxVarInt(the number of bytes in pM[tJ]["k"]) & pM[tJ]["k"] \
+         & cxVarInt(the number of bytes in pM[tJ]["v"]) & pM[tJ]["v"] after tOut
+   end repeat
+   return tOut & numToByte(0)
+end cxPsbtSerMap
+
+private function cxPsbtSerialize pP
+   local tOut
+   local tI
+   put cxHexDecode("70736274ff") & cxPsbtSerMap(pP["g"]) into tOut
+   repeat with tI = 1 to pP["txa"]["nin"]
+      put cxPsbtSerMap(pP["in"][tI]) after tOut
+   end repeat
+   repeat with tI = 1 to pP["txa"]["nout"]
+      put cxPsbtSerMap(pP["out"][tI]) after tOut
+   end repeat
+   return tOut
+end cxPsbtSerialize
+
+-- index of the single-byte key pType in map pM, or 0
+private function cxPsbtFind pM, pType
+   local tJ
+   repeat with tJ = 1 to pM["n"]
+      if the number of bytes in pM[tJ]["k"] is 1 and byteToNum(byte 1 of pM[tJ]["k"]) is pType then
+         return tJ
+      end if
+   end repeat
+   return 0
+end cxPsbtFind
+
+-- the spent output of input pI: ["spk"] + ["amt"], from WITNESS_UTXO or a
+-- full NON_WITNESS_UTXO (whose txid must match the outpoint, fail closed);
+-- ["spk"] empty when the PSBT carries neither
+private function cxPsbtUtxo pM, pTxidLE, pVout
+   local tR
+   local tJ
+   local tWu
+   local tPrev
+   put empty into tR["spk"]
+   put cxPsbtFind(pM, 1) into tJ
+   if tJ > 0 then
+      put pM[tJ]["v"] into tWu
+      if byteToNum(byte 9 of tWu) >= 253 then
+         throw "CoinXT: oversized utxo script (cxPsbtUtxo)"
+      end if
+      put cxRdU64(tWu, 1) into tR["amt"]
+      put byte 10 to -1 of tWu into tR["spk"]
+      return tR
+   end if
+   put cxPsbtFind(pM, 0) into tJ
+   if tJ > 0 then
+      if cxHash256(pM[tJ]["v"]) is not pTxidLE then
+         throw "CoinXT: previous tx does not match the outpoint (cxPsbtUtxo)"
+      end if
+      put cxTxParse(pM[tJ]["v"]) into tPrev
+      if pVout + 1 > tPrev["nout"] then
+         throw "CoinXT: outpoint vout beyond the previous outputs (cxPsbtUtxo)"
+      end if
+      put tPrev["out"][pVout + 1]["value"] into tR["amt"]
+      put tPrev["out"][pVout + 1]["spk"] into tR["spk"]
+   end if
+   return tR
+end cxPsbtUtxo
+
+-- the single-key SegWit program this input pays: "h160hex,nested" (nested
+-- true means P2SH-P2WPKH via the map's redeemScript), or empty
+private function cxPsbtProg pM, pSpk
+   local tJ
+   local tRedeem
+   if the number of bytes in pSpk is 22 and cxHexEncode(byte 1 to 2 of pSpk) is "0014" then
+      return cxHexEncode(byte 3 to 22 of pSpk) & comma & "false"
+   end if
+   if the number of bytes in pSpk is 23 and byteToNum(byte 1 of pSpk) is 169 and byteToNum(byte 23 of pSpk) is 135 then
+      put cxPsbtFind(pM, 4) into tJ
+      if tJ > 0 then
+         put pM[tJ]["v"] into tRedeem
+         if the number of bytes in tRedeem is 22 and cxHexEncode(byte 1 to 2 of tRedeem) is "0014" then
+            if cxHash160(tRedeem) is (byte 3 to 22 of pSpk) then
+               return cxHexEncode(byte 3 to 22 of tRedeem) & comma & "true"
+            end if
+         end if
+      end if
+   end if
+   return empty
+end cxPsbtProg
+
+-- the BIP-143 SIGHASH_ALL digest for input pIdx of the parsed unsigned tx
+private function cxPsbtDigest pTxa, pIdx, pProgHex, pAmt
+   local tPrevouts
+   local tSeqs
+   local tOuts
+   local tI
+   local tScriptCode
+   local tPre
+   put empty into tPrevouts
+   put empty into tSeqs
+   repeat with tI = 1 to pTxa["nin"]
+      put pTxa["in"][tI]["txidle"] & cxU32LE(pTxa["in"][tI]["vout"]) after tPrevouts
+      put cxU32LE(pTxa["in"][tI]["seq"]) after tSeqs
+   end repeat
+   put empty into tOuts
+   repeat with tI = 1 to pTxa["nout"]
+      put cxU64LE(pTxa["out"][tI]["value"]) \
+         & cxVarInt(the number of bytes in pTxa["out"][tI]["spk"]) \
+         & pTxa["out"][tI]["spk"] after tOuts
+   end repeat
+   put numToByte(25) & numToByte(118) & numToByte(169) & numToByte(20) \
+      & cxHexDecode(pProgHex) & numToByte(136) & numToByte(172) into tScriptCode
+   put cxU32LE(pTxa["version"]) & cxHash256(tPrevouts) & cxHash256(tSeqs) \
+      & pTxa["in"][pIdx]["txidle"] & cxU32LE(pTxa["in"][pIdx]["vout"]) \
+      & tScriptCode & cxU64LE(pAmt) & cxU32LE(pTxa["in"][pIdx]["seq"]) \
+      & cxHash256(tOuts) & cxU32LE(pTxa["locktime"]) & cxU32LE(1) into tPre
+   return cxHash256(tPre)
+end cxPsbtDigest
+
+-- address for a scriptPubKey (mainnet framing; the inverse of
+-- cxAddressToScript), or a describing string for non-standard scripts
+private function cxScriptToAddress pSpk
+   local tLen
+   local tFirst
+   put the number of bytes in pSpk into tLen
+   put byteToNum(byte 1 of pSpk) into tFirst
+   if tLen is 25 and cxHexEncode(byte 1 to 3 of pSpk) is "76a914" then
+      return cxBase58CheckEncode(0, byte 4 to 23 of pSpk)
+   end if
+   if tLen is 23 and tFirst is 169 then
+      return cxBase58CheckEncode(5, byte 3 to 22 of pSpk)
+   end if
+   if tLen >= 4 and tFirst is 0 and byteToNum(byte 2 of pSpk) is (tLen - 2) then
+      return cxBech32Encode("bc", 0, byte 3 to -1 of pSpk)
+   end if
+   if tLen >= 4 and tFirst >= 81 and tFirst <= 96 and byteToNum(byte 2 of pSpk) is (tLen - 2) then
+      return cxBech32Encode("bc", tFirst - 80, byte 3 to -1 of pSpk)
+   end if
+   return "(non-standard script " & cxHexEncode(pSpk) & ")"
+end cxScriptToAddress
+
+-- Decode a PSBT (base64 or hex) to a human-readable report: the tx shape,
+-- every input (outpoint, amount, type, signature count), every output
+-- (amount, address), and the fee when every input amount is known. This is
+-- the confirm-before-sign view an app shows a human. Fails closed.
+function cxPsbtDecode pPsbt
+   local tErr
+   local tP
+   local tI
+   local tJ
+   local tU
+   local tProg
+   local tSigs
+   local tKind
+   local tOut
+   local tInTotal
+   local tOutTotal
+   local tKnown
+   try
+      put cxPsbtParse(cxPsbtBytes(pPsbt)) into tP
+      put "psbt       " & tP["txa"]["nin"] & " input(s), " & tP["txa"]["nout"] \
+         & " output(s); tx version " & tP["txa"]["version"] \
+         & ", locktime " & tP["txa"]["locktime"] & return into tOut
+      put 0 into tInTotal
+      put true into tKnown
+      repeat with tI = 1 to tP["txa"]["nin"]
+         put cxPsbtUtxo(tP["in"][tI], tP["txa"]["in"][tI]["txidle"], tP["txa"]["in"][tI]["vout"]) into tU
+         put cxPsbtProg(tP["in"][tI], tU["spk"]) into tProg
+         put 0 into tSigs
+         repeat with tJ = 1 to tP["in"][tI]["n"]
+            if byteToNum(byte 1 of tP["in"][tI][tJ]["k"]) is 2 then
+               add 1 to tSigs
+            end if
+         end repeat
+         if tU["spk"] is empty then
+            put "no utxo info" into tKind
+            put false into tKnown
+         else if tProg is empty then
+            put "not single-key SegWit (decode-only here)" into tKind
+            add tU["amt"] to tInTotal
+         else if item 2 of tProg is "true" then
+            put "P2SH-P2WPKH (nested)" into tKind
+            add tU["amt"] to tInTotal
+         else
+            put "P2WPKH" into tKind
+            add tU["amt"] to tInTotal
+         end if
+         put "input  " & tI & "   " \
+            & cxHexEncode(cxReverseBytes(tP["txa"]["in"][tI]["txidle"])) \
+            & ":" & tP["txa"]["in"][tI]["vout"] & return after tOut
+         if tU["spk"] is empty then
+            put "           (amount unknown)   " & tKind & "   " & tSigs & " sig(s)" & return after tOut
+         else
+            put "           " & tU["amt"] & " sats   " & tKind & "   " & tSigs & " sig(s)" & return after tOut
+         end if
+      end repeat
+      put 0 into tOutTotal
+      repeat with tI = 1 to tP["txa"]["nout"]
+         add tP["txa"]["out"][tI]["value"] to tOutTotal
+         put "output " & tI & "   " & tP["txa"]["out"][tI]["value"] & " sats  -> " \
+            & cxScriptToAddress(tP["txa"]["out"][tI]["spk"]) & return after tOut
+      end repeat
+      if tKnown then
+         put "fee        " & (tInTotal - tOutTotal) & " sats" after tOut
+      else
+         put "fee        unknown (an input amount is missing)" after tOut
+      end if
+      return tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxPsbtDecode)")
+   end try
+end cxPsbtDecode
+
+-- insert a new entry into map pM after the last utxo / partial-sig entry
+-- (keytypes 0x00..0x02), keeping every other entry in its original order
+private function cxPsbtInsert pM, pKey, pVal
+   local tM2
+   local tJ
+   local tPos
+   local tAt
+   put 0 into tPos
+   repeat with tJ = 1 to pM["n"]
+      if byteToNum(byte 1 of pM[tJ]["k"]) <= 2 then
+         put tJ into tPos
+      end if
+   end repeat
+   put 0 into tAt
+   repeat with tJ = 1 to pM["n"]
+      add 1 to tAt
+      put pM[tJ]["k"] into tM2[tAt]["k"]
+      put pM[tJ]["v"] into tM2[tAt]["v"]
+      if tJ is tPos then
+         add 1 to tAt
+         put pKey into tM2[tAt]["k"]
+         put pVal into tM2[tAt]["v"]
+      end if
+   end repeat
+   if tPos is 0 then
+      -- no utxo/sig entries yet: the new one leads
+      put empty into tM2
+      put pKey into tM2[1]["k"]
+      put pVal into tM2[1]["v"]
+      repeat with tJ = 1 to pM["n"]
+         put pM[tJ]["k"] into tM2[tJ + 1]["k"]
+         put pM[tJ]["v"] into tM2[tJ + 1]["v"]
+      end repeat
+   end if
+   put pM["n"] + 1 into tM2["n"]
+   put pM["next"] into tM2["next"]
+   return tM2
+end cxPsbtInsert
+
+-- Sign a PSBT: add a SIGHASH_ALL partial signature to every single-key
+-- SegWit input (P2WPKH / nested) that pKey controls. pKey is a 32-byte
+-- secret key (matched by pubkey hash) OR a 73-byte HD master node, in which
+-- case each input's BIP32_DERIVATION entries are walked: the master
+-- fingerprint must match, the derived pubkey must match the entry AND the
+-- input's program. Inputs it cannot sign are left untouched, byte for byte
+-- (the BIP-174 signer role). Returns the updated PSBT as single-line base64.
+function cxPsbtSign pPsbt, pKey
+   local tErr
+   local tP
+   local tI
+   local tJ
+   local tK
+   local tU
+   local tProg
+   local tProgBytes
+   local tSk
+   local tPub
+   local tNode
+   local tFp
+   local tOff
+   local tN
+   local tIdx
+   local tHardened
+   local tCand
+   local tHave
+   local tDigest
+   local tSig
+   try
+      if the number of bytes in pKey is not 32 and the number of bytes in pKey is not 73 then
+         throw "CoinXT: pKey must be a 32-byte seckey or a 73-byte HD node (cxPsbtSign)"
+      end if
+      put cxPsbtParse(cxPsbtBytes(pPsbt)) into tP
+      repeat with tI = 1 to tP["txa"]["nin"]
+         -- only SIGHASH_ALL; an explicit other type is skipped, fail closed
+         put cxPsbtFind(tP["in"][tI], 3) into tJ
+         if tJ > 0 and cxRdU32(tP["in"][tI][tJ]["v"], 1) is not 1 then
+            next repeat
+         end if
+         put cxPsbtUtxo(tP["in"][tI], tP["txa"]["in"][tI]["txidle"], tP["txa"]["in"][tI]["vout"]) into tU
+         if tU["spk"] is empty then
+            next repeat
+         end if
+         put cxPsbtProg(tP["in"][tI], tU["spk"]) into tProg
+         if tProg is empty then
+            next repeat
+         end if
+         put cxHexDecode(item 1 of tProg) into tProgBytes
+         -- resolve the key for THIS input
+         put empty into tSk
+         if the number of bytes in pKey is 32 then
+            put cxPublicKey(pKey, true) into tPub
+            if cxHash160(tPub) is tProgBytes then
+               put pKey into tSk
+            end if
+         else
+            put byte 1 to 4 of cxHash160(cxHdPubkey(pKey)) into tFp
+            repeat with tJ = 1 to tP["in"][tI]["n"]
+               if the number of bytes in tP["in"][tI][tJ]["k"] is not 34 then
+                  next repeat
+               end if
+               if byteToNum(byte 1 of tP["in"][tI][tJ]["k"]) is not 6 then
+                  next repeat
+               end if
+               if byte 1 to 4 of tP["in"][tI][tJ]["v"] is not tFp then
+                  next repeat
+               end if
+               put byte 2 to 34 of tP["in"][tI][tJ]["k"] into tCand
+               put pKey into tNode
+               put 5 into tOff
+               repeat while tOff < the number of bytes in tP["in"][tI][tJ]["v"]
+                  put cxRdU32(tP["in"][tI][tJ]["v"], tOff) into tN
+                  put false into tHardened
+                  put tN into tIdx
+                  if tN >= 2147483648 then
+                     put true into tHardened
+                     put tN - 2147483648 into tIdx
+                  end if
+                  put cxHdDerive(tNode, tIdx, tHardened) into tNode
+                  if cxIsError(tNode) then
+                     throw tNode
+                  end if
+                  add 4 to tOff
+               end repeat
+               if cxHdPubkey(tNode) is tCand and cxHash160(tCand) is tProgBytes then
+                  put cxHdSeckey(tNode) into tSk
+                  put cxHdPubkey(tNode) into tPub
+                  put empty into tNode
+                  exit repeat
+               end if
+               put empty into tNode
+            end repeat
+         end if
+         if tSk is empty then
+            next repeat
+         end if
+         -- skip if this pubkey already has a partial signature
+         put false into tHave
+         repeat with tJ = 1 to tP["in"][tI]["n"]
+            if byteToNum(byte 1 of tP["in"][tI][tJ]["k"]) is 2 and byte 2 to 34 of tP["in"][tI][tJ]["k"] is tPub then
+               put true into tHave
+            end if
+         end repeat
+         if tHave then
+            put empty into tSk
+            next repeat
+         end if
+         put cxPsbtDigest(tP["txa"], tI, item 1 of tProg, tU["amt"]) into tDigest
+         put cxSign(tSk, tDigest) into tSig
+         put empty into tSk
+         if cxIsError(tSig) then
+            throw tSig
+         end if
+         put cxPsbtInsert(tP["in"][tI], numToByte(2) & tPub, \
+            cxSigToDer(tSig) & numToByte(1)) into tP["in"][tI]
+      end repeat
+      return cxPsbtB64(cxPsbtSerialize(tP))
+   catch tErr
+      put empty into tSk
+      return cxMakeError(tErr, "(cxPsbtSign)")
+   end try
+end cxPsbtSign
+
+-- Finalize every input (single-key SegWit only: the partial signature whose
+-- pubkey matches the program becomes the witness) and EXTRACT the network
+-- transaction. Returns txid & LF & the raw tx (Data, LAST); a clean error
+-- names the first input that cannot be finalized here.
+function cxPsbtFinalize pPsbt
+   local tErr
+   local tP
+   local tI
+   local tJ
+   local tU
+   local tProg
+   local tProgBytes
+   local tPub
+   local tDer
+   local tRedeem
+   local tSsig
+   local tBodyIns
+   local tOuts
+   local tWitness
+   local tRaw
+   local tStripped
+   try
+      put cxPsbtParse(cxPsbtBytes(pPsbt)) into tP
+      put empty into tBodyIns
+      put empty into tWitness
+      repeat with tI = 1 to tP["txa"]["nin"]
+         put cxPsbtUtxo(tP["in"][tI], tP["txa"]["in"][tI]["txidle"], tP["txa"]["in"][tI]["vout"]) into tU
+         put empty into tProg
+         if tU["spk"] is not empty then
+            put cxPsbtProg(tP["in"][tI], tU["spk"]) into tProg
+         end if
+         if tProg is empty then
+            throw "CoinXT: input " & tI & " is not a single-key SegWit input (cxPsbtFinalize)"
+         end if
+         put cxHexDecode(item 1 of tProg) into tProgBytes
+         put empty into tDer
+         repeat with tJ = 1 to tP["in"][tI]["n"]
+            if byteToNum(byte 1 of tP["in"][tI][tJ]["k"]) is 2 and cxHash160(byte 2 to 34 of tP["in"][tI][tJ]["k"]) is tProgBytes then
+               put byte 2 to 34 of tP["in"][tI][tJ]["k"] into tPub
+               put tP["in"][tI][tJ]["v"] into tDer
+               exit repeat
+            end if
+         end repeat
+         if tDer is empty then
+            throw "CoinXT: input " & tI & " is missing its signature (cxPsbtFinalize)"
+         end if
+         if item 2 of tProg is "true" then
+            put numToByte(0) & numToByte(20) & tProgBytes into tRedeem
+            put cxVarInt(the number of bytes in tRedeem) & tRedeem into tSsig
+         else
+            put empty into tSsig
+         end if
+         put tP["txa"]["in"][tI]["txidle"] & cxU32LE(tP["txa"]["in"][tI]["vout"]) \
+            & cxVarInt(the number of bytes in tSsig) & tSsig \
+            & cxU32LE(tP["txa"]["in"][tI]["seq"]) after tBodyIns
+         put numToByte(2) & cxVarInt(the number of bytes in tDer) & tDer \
+            & cxVarInt(33) & tPub after tWitness
+      end repeat
+      put cxVarInt(tP["txa"]["nin"]) & tBodyIns into tBodyIns
+      put cxVarInt(tP["txa"]["nout"]) into tOuts
+      repeat with tI = 1 to tP["txa"]["nout"]
+         put cxU64LE(tP["txa"]["out"][tI]["value"]) \
+            & cxVarInt(the number of bytes in tP["txa"]["out"][tI]["spk"]) \
+            & tP["txa"]["out"][tI]["spk"] after tOuts
+      end repeat
+      put cxU32LE(tP["txa"]["version"]) & numToByte(0) & numToByte(1) \
+         & tBodyIns & tOuts & tWitness & cxU32LE(tP["txa"]["locktime"]) into tRaw
+      put cxU32LE(tP["txa"]["version"]) & tBodyIns & tOuts \
+         & cxU32LE(tP["txa"]["locktime"]) into tStripped
+      return cxHexEncode(cxReverseBytes(cxHash256(tStripped))) & return & tRaw
+   catch tErr
+      return cxMakeError(tErr, "(cxPsbtFinalize)")
+   end try
+end cxPsbtFinalize
+
 --
 -- entropy <-> words + the checksum word are pure bytes over cxSha256; the
 -- mnemonic -> seed step is PBKDF2-HMAC-SHA512 (cxPbkdf2HmacSha512), 2048

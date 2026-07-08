@@ -231,6 +231,13 @@ Bitcoin transactions (the BIP-143 P2WPKH layer; the CALLER shows the fields + fe
   cxBtcTxSignP2WPKH(pSeckey, pTxid, pVout, pAmountSats, pOutputs, pNested, pVersion, pSequence,
                     pLocktime)            -> txid & LF & sighash & LF & raw signed tx (one SegWit
                                              input, native or BIP-49 nested; SIGHASH_ALL)
+
+PSBT (BIP-174, the cold-signer surface; single-key SegWit inputs sign, everything decodes):
+  cxPsbtDecode(pPsbt)                     -> human-readable intent report (inputs, outputs, fee)
+  cxPsbtSign(pPsbt, pKey)                 -> updated PSBT base64; pKey = 32-byte seckey (matched by
+                                             pubkey hash) or 73-byte HD node (walks the PSBT's own
+                                             BIP32_DERIVATION paths); untouched inputs stay byte-exact
+  cxPsbtFinalize(pPsbt)                   -> txid & LF & extracted network tx (single-key inputs)
 ```
 
 ## 7. Formats CoinXT must get byte-exact (the spec inside the spec)

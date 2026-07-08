@@ -107,6 +107,16 @@ constant kBtcSighash = "64f3b0f4dd2bb3aa1ce8566d220cc74dda9df97d8490cc81d89d735c
 constant kBtcDer = "3044022047ac8e878352d3ebbde1c94ce3a10d057c24175747116f8288e5d794d12d482f0220217f36a485cae903c713331d877c1f64677e3622ad4010726870540656fe9dcb"
 constant kBtcRaw = "01000000000101db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a5477010000001716001479091972186c449eb1ded22b78e40d009bdf0089feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac02473044022047ac8e878352d3ebbde1c94ce3a10d057c24175747116f8288e5d794d12d482f0220217f36a485cae903c713331d877c1f64677e3622ad4010726870540656fe9dcb012103ad1d8e89212f0b92c74d23bb710c00662ad1470198ac48c43f7d6f93a2a2687392040000"
 constant kBtcNewTxid = "ef48d9d0f595052e0f8cdcf825f7a5e50b6a388a81f206f3f4846e5ecd7a0c23"
+-- PSBT (BIP-174): the BIP-143 example wrapped as a PSBT, its signed form
+-- (carrying the BIP's published DER), and an HD-signing PSBT whose
+-- BIP32_DERIVATION path walks m/84'/0'/0'/0/0 from the canonical mnemonic's
+-- master node (fingerprint 73c5da0a). All locked through Python mirrors in
+-- tools/coin-kat.py; the signed/extracted results end at published bytes.
+constant kPsbt143In = "cHNidP8BAHcBAAAAAdtrGyCqD9eyOIC+LsvUqYEwl0z0dI+2YJKsTTzrGlR3AQAAAAD+////Ari06wsAAAAAGXapFKRXtoTX8NU5pGpFu8BD81tZ0NljiKwACK8vAAAAABl2qRT9Jwse5qvK6pf+p60EAui9itbXfIiskgQAAAABASAAypo7AAAAABepFEcz83z024b7wu/tJQC09OSfMSAjhwEDBAEAAAABBBYAFHkJGXIYbESesd7SK3jkDQCb3wCJAAAA"
+constant kPsbt143Signed = "cHNidP8BAHcBAAAAAdtrGyCqD9eyOIC+LsvUqYEwl0z0dI+2YJKsTTzrGlR3AQAAAAD+////Ari06wsAAAAAGXapFKRXtoTX8NU5pGpFu8BD81tZ0NljiKwACK8vAAAAABl2qRT9Jwse5qvK6pf+p60EAui9itbXfIiskgQAAAABASAAypo7AAAAABepFEcz83z024b7wu/tJQC09OSfMSAjhyICA60djokhLwuSx00ju3EMAGYq0UcBmKxIxD99b5OiomhzRzBEAiBHrI6Hg1LT673hyUzjoQ0FfCQXV0cRb4KI5deU0S1ILwIgIX82pIXK6QPHEzMdh3wfZGd+NiKtQBByaHBUBlb+ncsBAQMEAQAAAAEEFgAUeQkZchhsRJ6x3tIreOQNAJvfAIkAAAA="
+constant kPsbtHd = "cHNidP8BAFICAAAAAaqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqAAAAAAD9////AZBfAQAAAAAAFgAUdR526BmRltRUlBxF0bOjI/FDO9YAAAAAAAEBH6CGAQAAAAAAFgAUwM681sPTyox13F7GLr5VMw75EOIiBgMw1U/Q3UIKbl+NNiT180gsrjUPedXwdTv1vu+cLZGvPBhzxdoKVAAAgAAAAIAAAACAAAAAAAAAAAAAAA=="
+constant kPsbtHdTxid = "28257a9a303b3eb63c4366754ac0905a9b73548e6a3158c86e408bdf018cff85"
+constant kPsbtHdRaw = "02000000000101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000fdffffff01905f010000000000160014751e76e8199196d454941c45d1b3a323f1433bd602483045022100cae928967fc76aa2e058328d58d824f58472fe659066dc6aa9c5ba2449b4359c02201f202c8eb5dfe810a28e465c68d260ec6c263be7acb42e528fb4bda055a7dc1001210330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c00000000"
 
 function cxSelfTest
    local tAbi
@@ -160,6 +170,7 @@ function cxSelfTest
    testRlp
    testEthTx
    testBtcTx
+   testPsbt
    testMnemonics
    testHd
    testSchnorr
@@ -552,6 +563,37 @@ on testBtcTx
       "outputs exceeding the input are rejected (no negative fee)"
    put empty into tSk
 end testBtcTx
+
+-- the PSBT cold-signer chain: decode intent, sign only what the key
+-- controls, finalize, extract - ending at the BIP-143 published bytes
+on testPsbt
+   local tSigned
+   local tRes
+   local tMaster
+   cxtSection "PSBT (BIP-174 cold signing)"
+   put cxPsbtDecode(kPsbt143In) into tRes
+   cxtCheck (tRes contains "1 input(s), 2 output(s)" and tRes contains "fee        3400 sats"), \
+      "decode reports the tx shape and the 3400-sat fee"
+   cxtCheck (tRes contains "P2SH-P2WPKH"), "decode classifies the nested input"
+   put cxPsbtSign(kPsbt143In, cxtBin(kBtcKey)) into tSigned
+   cxtCheck (tSigned is kPsbt143Signed), \
+      "signing produces the pinned signed PSBT (the BIP published DER inside)"
+   cxtCheck (cxPsbtSign(kPsbt143In, cxtBin(kSk1)) is kPsbt143In), \
+      "an unrelated key leaves the PSBT byte-identical"
+   put cxPsbtFinalize(tSigned) into tRes
+   cxtCheck (line 1 of tRes is kBtcNewTxid), "finalize reports the published txid"
+   cxtCheck (cxHexEncode(line 2 to -1 of tRes) is kBtcRaw), \
+      "the extracted tx is byte-identical to the BIP-143 example"
+   -- HD signing: the master node walks the psbt BIP32_DERIVATION path
+   put cxHdFromSeed(cxMnemonicToSeed(kMnem128, empty)) into tMaster
+   put cxPsbtSign(kPsbtHd, tMaster) into tSigned
+   put empty into tMaster
+   put cxPsbtFinalize(tSigned) into tRes
+   cxtCheck (line 1 of tRes is kPsbtHdTxid), "HD-signed txid matches the pin"
+   cxtCheck (cxHexEncode(line 2 to -1 of tRes) is kPsbtHdRaw), \
+      "HD signing walked m/84h/0h/0h/0/0 and extracted the pinned tx"
+   cxtCheck cxIsError(cxPsbtDecode("cHNidP8Xnope")), "a corrupt PSBT is rejected"
+end testPsbt
 
 -- the demo's headline flow, end to end on-engine: the canonical mnemonic
 -- restores to the published first addresses of every standard path (the
