@@ -12,11 +12,12 @@
 -- hand-rolled signer, these primitives fail closed.
 --
 -- Tabs: Keys (make + validate a secp256k1 key, derive its public key),
--- Sign & Verify (deterministic RFC 6979 ECDSA + tamper rejection), Ethereum
--- (recoverable signatures + ecrecover), Shared Secret (ECDH), Hashes (the
--- Keccak-256 vs SHA3-256 footgun, side by side, plus SHA-2, RIPEMD-160,
--- hash160/hash256), Key Derivation (HMAC + PBKDF2, the BIP-39 seed shape),
--- About (the pitch + a one-click self-test over every primitive).
+-- Addresses (Bitcoin legacy + SegWit, Ethereum with EIP-55), Sign & Verify
+-- (deterministic RFC 6979 ECDSA + tamper rejection), Ethereum (recoverable
+-- signatures + ecrecover), Shared Secret (ECDH), Hashes (the Keccak-256 vs
+-- SHA3-256 footgun, side by side, plus SHA-2, RIPEMD-160, hash160/hash256),
+-- Seed (a BIP-39 mnemonic -> the 64-byte master seed), About (the pitch +
+-- a one-click self-test over every primitive).
 --
 -- KEYS IN THIS DEMO ARE PUBLIC TEST KEYS. The demo key derives from the
 -- famously compromised phrase "correct horse battery staple", so it is safe
@@ -64,7 +65,7 @@ constant kClrPillBad = "247,216,216"     -- ABI pill: not loaded
 constant kClrPillBadText = "150,42,42"
 
 -- ------------------------------------------------------------------ state
-local sTab            -- active tab key: keys | addr | sign | eth | ecdh | hash | kdf | about
+local sTab            -- active tab key: keys | addr | sign | eth | ecdh | hash | seed | about
 local sSeckey         -- the demo seckey (PUBLIC test key material only)
 local sPub33          -- its compressed pubkey
 local sPub65          -- its uncompressed pubkey
@@ -376,7 +377,7 @@ on buildUI
    cxdButton "ui:tabEth", "345,84,448,114", "Ethereum", "idle"
    cxdButton "ui:tabEcdh", "452,84,555,114", "ECDH", "idle"
    cxdButton "ui:tabHash", "559,84,662,114", "Hashes", "idle"
-   cxdButton "ui:tabKdf", "666,84,769,114", "Derive", "idle"
+   cxdButton "ui:tabSeed", "666,84,769,114", "Seed", "idle"
    cxdButton "ui:tabAbout", "773,84,876,114", "About", "idle"
 
    -- content panel + footer
@@ -389,7 +390,7 @@ on buildUI
    buildEthTab
    buildEcdhTab
    buildHashTab
-   buildKdfTab
+   buildSeedTab
    buildAboutTab
 end buildUI
 
@@ -498,15 +499,17 @@ on buildHashTab
 end buildHashTab
 
 -- ---- Key Derivation tab
-on buildKdfTab
-   cxdHdr "kdf:h", "48,138,852,166", "HMAC and PBKDF2: the building blocks of HD wallets"
-   cxdCap "kdf:p", "48,168,852,214", "HMAC-SHA512 is the core of BIP-32 key derivation; PBKDF2-HMAC-SHA512 with 2048 iterations turns a BIP-39 mnemonic into a 64-byte seed. Both are pinned to public test vectors and shown here end to end.", kClrInkSoft
-   cxdCap "kdf:msgLabel", "48,224,852,244", "Passphrase (used as the HMAC message and the PBKDF2 password):", kClrInkMute
-   cxdInput "kdf:msg", "48,246,700,278", "abandon abandon ability"
-   cxdButton "kdf:go", "712,246,852,278", "Derive", "primary"
-   cxdMono "kdf:out", "48,290,852,452"
-   cxdLabel "kdf:status", "48,566,852,600", "Enter a passphrase and click Derive.", kClrInkSoft, 12, "plain"
-end buildKdfTab
+on buildSeedTab
+   cxdHdr "seed:h", "48,138,852,166", "Seed phrases: a wallet you can write down (BIP-39)"
+   cxdCap "seed:p", "48,168,852,222", "Twelve everyday words encode your entropy plus a checksum, so a single typo is caught. Those words, with an optional passphrase, run through PBKDF2-HMAC-SHA512 (2048 rounds) to make the 64-byte master seed a whole HD wallet derives from. Entropy comes from SodiumXT if it is loaded, otherwise a fixed DEMO value.", kClrInkSoft
+   cxdButton "seed:go", "48,230,236,260", "Generate a seed phrase", "primary"
+   cxdCap "seed:ppLabel", "252,238,404,258", "Passphrase (optional):", kClrInkMute
+   cxdInput "seed:pp", "408,232,700,262", ""
+   cxdCap "seed:outLabel", "48,274,852,294", "mnemonic (12 words) / checksum / 64-byte master seed:", kClrInkMute
+   cxdMono "seed:out", "48,296,852,452"
+   cxdCap "seed:note", "48,462,852,502", "This 64-byte seed is the BIP-32 MASTER seed. Deriving the account keys at a path like m/44'/0'/0'/0/0 is the next step - it needs a native addition, because the child-key tweak is secp256k1 math that must be trezor-crypto's.", kClrInkMute
+   cxdLabel "seed:status", "48,566,852,600", "Click Generate to make a fresh BIP-39 seed phrase.", kClrInkSoft, 12, "plain"
+end buildSeedTab
 
 -- ---- About tab (pitch + embedded self-test)
 on buildAboutTab
@@ -543,7 +546,7 @@ on restyleTabs
    styleTab "ui:tabEth", (sTab is "eth")
    styleTab "ui:tabEcdh", (sTab is "ecdh")
    styleTab "ui:tabHash", (sTab is "hash")
-   styleTab "ui:tabKdf", (sTab is "kdf")
+   styleTab "ui:tabSeed", (sTab is "seed")
    styleTab "ui:tabAbout", (sTab is "about")
 end restyleTabs
 
@@ -581,8 +584,8 @@ on mouseUp
       handleEcdh tRole
    else if tPrefix is "hash" then
       handleHash tRole
-   else if tPrefix is "kdf" then
-      handleKdf tRole
+   else if tPrefix is "seed" then
+      handleSeed tRole
    else if tPrefix is "about" then
       handleAbout tRole
    end if
@@ -601,8 +604,8 @@ on handleChrome pRole
       showTab "ecdh"
    else if pRole is "tabHash" then
       showTab "hash"
-   else if pRole is "tabKdf" then
-      showTab "kdf"
+   else if pRole is "tabSeed" then
+      showTab "seed"
    else if pRole is "tabAbout" then
       showTab "about"
    end if
@@ -903,32 +906,49 @@ on doHashAll
    cxdStatus "hash:status", "Notice how keccak256 and sha3-256 differ completely.", "ok"
 end doHashAll
 
--- ------------------------------------------------------------------ Key Derivation tab actions
-on handleKdf pRole
+-- ------------------------------------------------------------------ Seed Phrase (BIP-39) tab actions
+on handleSeed pRole
    if pRole is "go" then
-      doDerive
+      doSeed
    end if
-end handleKdf
+end handleSeed
 
-on doDerive
+on doSeed
+   local tEntropy
+   local tErr
+   local tMnem
+   local tSeed
    local tPass
    local tOut
-   local tSeed
-   put cxdAscii(field "kdf:msg") into tPass
-   put "hmac-sha256  " & cxdHex(cxHmacSha256(cxdAscii("Bitcoin seed"), tPass)) & return into tOut
-   put "hmac-sha512  " & cxdShort(cxHmacSha512(cxdAscii("Bitcoin seed"), tPass), 96) & return after tOut
-   put "             ^ HMAC-SHA512(key=Bitcoin seed) is the BIP-32 master step" & return & return after tOut
-   put cxPbkdf2HmacSha512(tPass, cxdAscii("mnemonicTREZOR"), 2048, 64) into tSeed
-   if cxIsError(tSeed) then
-      cxdStatus "kdf:status", tSeed, "bad"
-      exit doDerive
+   -- 16 bytes of entropy: SodiumXT if present, else a fixed DEMO value (so a
+   -- machine without SodiumXT still runs, loudly non-random)
+   try
+      put sxRandomBytes(16) into tEntropy
+   catch tErr
+      put byte 1 to 16 of cxSha256(cxdAscii("coinxt demo seed entropy")) into tEntropy
+   end try
+   put cxMnemonicFromEntropy(tEntropy) into tMnem
+   if cxIsError(tMnem) then
+      cxdStatus "seed:status", tMnem, "bad"
+      exit doSeed
    end if
-   put "bip39 seed   " & cxdHex(tSeed) after tOut
-   put "             ^ PBKDF2-HMAC-SHA512, 2048 iters, salt mnemonic+passphrase" & return after tOut
-   put tOut into field "kdf:out"
-   put empty into tPass
-   cxdStatus "kdf:status", "This is exactly how a BIP-39 mnemonic becomes a 64-byte wallet seed.", "ok"
-end doDerive
+   put field "seed:pp" into tPass
+   put cxMnemonicToSeed(tMnem, tPass) into tSeed
+   if cxIsError(tSeed) then
+      cxdStatus "seed:status", tSeed, "bad"
+      exit doSeed
+   end if
+   put "mnemonic   " & tMnem & return & return into tOut
+   if cxMnemonicValidate(tMnem) then
+      put "checksum   valid (a typo in any word would be caught)" & return after tOut
+   else
+      put "checksum   INVALID" & return after tOut
+   end if
+   put "seed       " & cxdHex(tSeed) after tOut
+   put tOut into field "seed:out"
+   put empty into tEntropy
+   cxdStatus "seed:status", "Twelve words to a 64-byte master seed. Write real ones on paper; never a demo one.", "ok"
+end doSeed
 
 -- ------------------------------------------------------------------ About tab: embedded self-test
 on handleAbout pRole
@@ -941,6 +961,7 @@ on doSelfTest
    local tSk
    local tHash
    local tSig
+   local tMnem
    put 0 into sTPass
    put 0 into sTFail
    put "CoinXT self-test" & return & return into sTLog
@@ -990,6 +1011,23 @@ on doSelfTest
    put cxSignRecoverable(tSk, tHash) into tSig
    checkInto (cxRecover(tSig, tHash) is cxPublicKey(tSk, false)), \
       "ecrecover returns the signing pubkey"
+
+   -- addresses (the BIP-173 SegWit example, the pk=1 Ethereum address)
+   checkInto (cxBtcAddressP2WPKH(cxPublicKey(tSk, true), true) is \
+      "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), \
+      "P2WPKH(pubkey 1) is the BIP-173 example address"
+   checkInto (cxEthAddress(cxPublicKey(tSk, false)) is \
+      "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"), \
+      "ethAddress(pubkey 1) is the pk=1 EIP-55 address"
+
+   -- BIP-39 (the classic all-zero 128-bit vector)
+   put "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" into tMnem
+   checkInto (cxMnemonicFromEntropy(cxdBin("00000000000000000000000000000000")) is tMnem), \
+      "128-bit zero entropy makes the canonical 12-word mnemonic"
+   checkInto (cxMnemonicValidate(tMnem) is true), "the mnemonic validates (checksum ok)"
+   checkInto (cxdHex(cxMnemonicToSeed(tMnem, "TREZOR")) is \
+      "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"), \
+      "mnemonic + TREZOR makes the pinned 64-byte seed"
 
    put sTLog into field "about:out"
    if sTFail is 0 then

@@ -62,10 +62,13 @@ CoinXT/
     vendor/                 the vendored trezor-crypto subset (MIT) + VENDOR.md + LICENSE
   src/
     coinxt.lcb              the foreign-handler module (binds to cnx_*; needs an on-engine pass)
-    coinxt.livecodescript   the public cx* API + the phase-3 script encodings (hex, Base58Check,
-                            Bech32, EIP-55) and BTC/ETH address builders
+    coinxt.livecodescript   the public cx* API + the phase-3 encodings (hex, Base58Check, Bech32,
+                            EIP-55), the BTC/ETH address builders, and BIP-39 mnemonics
     code/                   committed per-platform native libraries (coinxt.so/.dll/.dylib), laid
                             down by CI on main + pinned in src/code/MANIFEST.sha256
+  data/
+    bip39-english.txt       the canonical BIP-39 English wordlist (2048 words), embedded into
+                            coinxt.livecodescript and integrity-checked by coin-kat.py
   tests/
     coinxt_smoke_test.c     walks every cnx_ export once (ctest on every CI lane; ASan via build.sh)
   tools/
@@ -112,11 +115,15 @@ match its outputs byte for byte, in both directions. The `.lcb` foreign module a
 script API are written and pass the static gates; there is no headless OXT compiler, so their honest
 status is "designed and statically reasoned; needs an on-engine pass", and the on-engine self-test
 harness (`examples/coinxt-tests.livecodescript`) plus the self-building demo stack
-(`examples/coinxt-demo.livecodescript`) are ready for that pass. The build and packaging now follow
-the family model: a CMake build, a 5-platform CI matrix, and per-platform binaries committed under
-`src/code/` on main. Next: encodings/addresses (phase 3, pure script), then HD wallets and mnemonics
-(phase 4). Schnorr / BIP-340 is deferred to a Taproot phase (upstream provides it only through
-secp256k1-zkp).
+(`examples/coinxt-demo.livecodescript`) are ready for that pass; the full stack ran 41/41 on a real
+engine (see [CLAUDE.md](CLAUDE.md)). The build and packaging follow the family model: a CMake build, a
+5-platform CI matrix, and per-platform binaries committed under `src/code/` on main. **Phase 3
+(addresses) and BIP-39 mnemonics are now in**, pure script: hex, Base58Check, Bech32, EIP-55, the BTC
+(P2PKH, P2WPKH) + ETH address builders, and `cxMnemonicFromEntropy` / `cxMnemonicValidate` /
+`cxMnemonicToSeed` over the embedded 2048-word list - all transcription-verified against Python and
+vector-locked in CI to the public BIP-173 / EIP-55 / Trezor BIP-39 vectors (needs an on-engine pass).
+Next: BIP-32 HD derivation, the one piece that needs native work (vendored `bip32.c` + an ABI bump).
+Schnorr / BIP-340 is deferred to a Taproot phase (upstream provides it only through secp256k1-zkp).
 
 [SPEC.md](SPEC.md), [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md), and [CLAUDE.md](CLAUDE.md) are the
 design and the running as-built log. Every deterministic path is pinned to a public known-answer vector,

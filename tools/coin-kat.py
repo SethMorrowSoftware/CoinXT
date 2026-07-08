@@ -570,6 +570,92 @@ def run_address_vectors(lib, kat):
                   _eth_address(pub65) == exp_eth)
 
 
+# ---------------------------------------------------------------------------
+# BIP-39 (phase 4a, script). Like the address encoders, the mnemonic logic is
+# livecodescript and cannot be driven here; the on-engine harness checks it.
+# This file (a) verifies the shipped wordlist is the canonical BIP-39 English
+# list, (b) parses the wordlist EMBEDDED in src/coinxt.livecodescript and
+# asserts it is byte-identical to that file (so the embed cannot drift), and
+# (c) locks the published Trezor mnemonic/seed vectors the harness checks.
+BIP39_WORDLIST = os.path.join(HERE, "..", "data", "bip39-english.txt")
+BIP39_WORDLIST_SHA256 = \
+    "2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda"
+COINXT_LCS = os.path.join(HERE, "..", "src", "coinxt.livecodescript")
+# Trezor BIP-39 vectors (entropy hex -> mnemonic, seed with passphrase "TREZOR")
+BIP39_VECTORS = [
+    ("00000000000000000000000000000000",
+     "abandon abandon abandon abandon abandon abandon abandon abandon "
+     "abandon abandon abandon about",
+     "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f"
+     "09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"),
+    ("0000000000000000000000000000000000000000000000000000000000000000",
+     "abandon abandon abandon abandon abandon abandon abandon abandon "
+     "abandon abandon abandon abandon abandon abandon abandon abandon "
+     "abandon abandon abandon abandon abandon abandon abandon art",
+     "bda85446c68413707090a52022edd26a1c9462295029f2e60cd7c4f2bbd309717"
+     "0af7a4d73245cafa9c3cca8d561a7c3de6f5d4a10be8ed2a5e608d68f92fcc8"),
+]
+
+
+def _read_embedded_wordlist():
+    """Extract the wordlist embedded in src/coinxt.livecodescript's
+    cxBip39Ensure block (the `put "..." into/after tWords` lines)."""
+    import re
+    text = open(COINXT_LCS, encoding="utf-8").read()
+    # only within the cxBip39Ensure command body
+    start = text.find("private command cxBip39Ensure")
+    end = text.find("end cxBip39Ensure", start)
+    body = text[start:end]
+    parts = re.findall(r'put "([^"]*)" (?:into|after) tWords', body)
+    return " ".join(parts).split()
+
+
+def run_bip39_checks(lib, kat):
+    if not os.path.isfile(BIP39_WORDLIST):
+        kat.check("BIP-39 wordlist present", False, "data/bip39-english.txt missing")
+        return
+    words = open(BIP39_WORDLIST, encoding="utf-8").read().split()
+    digest_hex = hashlib.sha256(
+        open(BIP39_WORDLIST, "rb").read()).hexdigest()
+    kat.check("BIP-39 wordlist is the canonical list",
+              len(words) == 2048 and digest_hex == BIP39_WORDLIST_SHA256)
+    embedded = _read_embedded_wordlist()
+    kat.check("embedded wordlist matches data/bip39-english.txt (no drift)",
+              embedded == words)
+
+    # Reference BIP-39 (the exact bounded algorithm the livecodescript uses),
+    # asserted against the published Trezor vectors so the harness's expected
+    # strings are locked.
+    def from_entropy(ent):
+        n = len(ent)
+        cs = (n * 8) // 32
+        numw = ((n * 8) + cs) // 11
+        full = ent + hashlib.sha256(ent).digest()[:1]
+        acc = bits = bidx = 0
+        out = []
+        for _ in range(numw):
+            while bits < 11:
+                acc = acc * 256 + full[bidx]
+                bidx += 1
+                bits += 8
+            bits -= 11
+            out.append(words[(acc >> bits) & 0x7FF])
+            acc &= (1 << bits) - 1
+        return " ".join(out)
+
+    def to_seed(mnem, passphrase=""):
+        return hashlib.pbkdf2_hmac(
+            "sha512", mnem.encode(), ("mnemonic" + passphrase).encode(),
+            2048, 64).hex()
+
+    for hexent, exp_mnem, exp_seed in BIP39_VECTORS:
+        ent = bytes.fromhex(hexent)
+        kat.check(f"BIP-39 mnemonic vector locked ({len(ent) * 8}-bit)",
+                  from_entropy(ent) == exp_mnem)
+        kat.check(f"BIP-39 seed vector locked ({len(ent) * 8}-bit)",
+                  to_seed(exp_mnem, "TREZOR") == exp_seed)
+
+
 def main(argv):
     check = "--check" in argv[1:]
     cc = find_cc()
@@ -595,6 +681,7 @@ def main(argv):
         run_curve_kats(lib, kat)
         run_external_crosschecks(lib, kat)
         run_address_vectors(lib, kat)
+        run_bip39_checks(lib, kat)
 
     if kat.problems:
         for p in kat.problems:

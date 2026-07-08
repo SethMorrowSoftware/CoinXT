@@ -45,6 +45,11 @@ constant kEcdhX = "74f43c053591097e99e0886e03499baec02c6702a12db92347151afadf03c
 constant kAddrP2PKH = "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"
 constant kAddrP2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
 constant kAddrEth = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+-- the classic BIP-39 vector: all-zero 128-bit entropy, its mnemonic, and the
+-- seed with passphrase "TREZOR" (the Trezor python-mnemonic test vectors)
+constant kEnt128 = "00000000000000000000000000000000"
+constant kMnem128 = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+constant kSeed128 = "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
 
 function cxSelfTest
    local tAbi
@@ -92,6 +97,7 @@ function cxSelfTest
    testEcdh
    testEncodings
    testAddresses
+   testMnemonics
 
    put return & "----" & return after sLog
    put "PASSED:" && sPass & "   FAILED:" && sFail after sLog
@@ -322,3 +328,24 @@ on testAddresses
    cxtCheck cxIsError(cxEthAddressChecksum("0x1234")), \
       "EIP-55 rejects a wrong-length address (fail closed)"
 end testAddresses
+
+on testMnemonics
+   local tMnem
+   local tSeed
+   local tTampered
+   cxtSection "BIP-39 mnemonics"
+   -- entropy -> mnemonic (the classic all-zero 128-bit vector)
+   put cxMnemonicFromEntropy(cxtBin(kEnt128)) into tMnem
+   cxtCheck (tMnem is kMnem128), "128-bit zero entropy makes the canonical 12-word mnemonic"
+   -- validate: the good mnemonic passes, a tampered checksum word fails closed
+   cxtCheck (cxMnemonicValidate(kMnem128) is true), "the mnemonic validates (checksum ok)"
+   put "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon zoo" into tTampered
+   cxtCheck (cxMnemonicValidate(tTampered) is false), "a wrong checksum word is rejected"
+   cxtCheck (cxMnemonicValidate("notaword " & kMnem128) is false), "an unknown word / wrong length is rejected"
+   -- mnemonic -> seed (PBKDF2-HMAC-SHA512, passphrase TREZOR)
+   put cxMnemonicToSeed(kMnem128, "TREZOR") into tSeed
+   cxtCheck (cxtHex(tSeed) is kSeed128), "mnemonic + TREZOR passphrase makes the pinned 64-byte seed"
+   -- wrong-length entropy fails closed with a clean error
+   cxtCheck cxIsError(cxMnemonicFromEntropy(cxtBin("00112233"))), \
+      "entropy that is not 16-32 bytes is rejected"
+end testMnemonics

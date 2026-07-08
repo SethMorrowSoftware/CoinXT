@@ -428,3 +428,32 @@ Next: BIP-39 seed phrases (pure script + the shipped 2048-word list; `mnemonic -
 via `cxPbkdf2HmacSha512`), then BIP-32 HD derivation (the one piece that NEEDS native work - the child
 key tweak is secp256k1 scalar/point math, so it means vendoring `bip32.c`, an ABI bump to 3, and
 rebuilt binaries).
+
+**Phase 4a - BIP-39 mnemonics, pure script (2026-07-08).** Seed phrases landed in
+`src/coinxt.livecodescript`, still no native change (the `mnemonic -> seed` step is the existing
+`cxPbkdf2HmacSha512`):
+
+- New public API: `cxMnemonicFromEntropy` (entropy 16-32 bytes -> checksum bits from `cxSha256` ->
+  11-bit word indices via a MASKED accumulator), `cxMnemonicValidate` (rebuilds the entropy bytes with
+  a bounded byte buffer - NOT a 264-bit integer, which would blow past 2^53 - and re-checks the
+  checksum, fail closed), and `cxMnemonicToSeed` (PBKDF2-HMAC-SHA512, 2048 iters, salt
+  "mnemonic" + passphrase, 64 bytes).
+- **The 2048-word English wordlist is EMBEDDED** in the `.livecodescript` (a `cxBip39Ensure` command
+  builds a return-delimited cache once; lookups use `lineOffset` with `the wholeMatches`), so the
+  library is self-contained. It is byte-identical to `data/bip39-english.txt` (the canonical list,
+  sha256 `2f5eed...24dbda`). `tools/coin-kat.py` verifies that file's hash AND parses the embedded
+  block out of the `.livecodescript` and asserts it equals the file, so the embed cannot silently
+  drift. The bounded from-entropy and validate algorithms were transcribed 1:1 to Python and checked
+  against the Trezor BIP-39 vectors (128 and 256 bit) before pinning; those vectors are locked in
+  coin-kat and re-run on-engine in `examples/coinxt-tests.livecodescript` (generate, validate, reject
+  a tampered checksum word, reject a non-word, derive the pinned seed, reject wrong-length entropy).
+- **NFKD limit, documented:** the English wordlist and ASCII passphrases are already NFKD, so the seed
+  is byte-exact; a non-ASCII passphrase would need NFKD the engine does not apply here.
+- The demo's "Derive" tab became a **Seed** tab: click once to make a fresh 12-word phrase (SodiumXT
+  entropy if present, else a fixed DEMO value), see the checksum validate green, and get the 64-byte
+  master seed, with a note that deriving the account keys at `m/44'/.../...` is the next step.
+
+Next (the last wallet piece): BIP-32 HD derivation. This is the one that NEEDS native work - the child
+key tweak is secp256k1 scalar/point math - so it means vendoring `bip32.c` (which pulls the
+ed25519-donna subtree), new `cnx_hdnode_*` exports, an ABI bump to 3, `cxCheckABI` to 3, and rebuilt
+per-platform binaries.

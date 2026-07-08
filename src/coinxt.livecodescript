@@ -719,3 +719,278 @@ function cxBtcAddressP2WPKH pPubkey, pMainnet
    end if
    return cxBech32Encode(tHrp, 0, tH160)
 end cxBtcAddressP2WPKH
+
+----------------------------------------------------------------------
+-- BIP-39 mnemonics (PURE SCRIPT; phase 4a)
+--
+-- entropy <-> words + the checksum word are pure bytes over cxSha256; the
+-- mnemonic -> seed step is PBKDF2-HMAC-SHA512 (cxPbkdf2HmacSha512), 2048
+-- iterations, salt "mnemonic" + passphrase, 64-byte seed. The 2048-word
+-- English wordlist is EMBEDDED below so the library is self-contained; it is
+-- byte-identical to data/bip39-english.txt (the canonical BIP-39 list, sha256
+-- 2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda), and
+-- tools/coin-kat.py parses this block and asserts it matches that file so the
+-- two cannot drift. NFKD note: the English wordlist and ASCII passphrases are
+-- already NFKD, so the seed is byte-exact; a non-ASCII passphrase would need
+-- NFKD normalization the engine does not apply here (documented limit).
+----------------------------------------------------------------------
+
+-- the wordlist, cached return-delimited on first use for whole-word lookup
+local sBip39List
+
+private command cxBip39Ensure
+   local tWords
+   if sBip39List is not empty then
+      exit cxBip39Ensure
+   end if
+   put "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid" into tWords
+   put " acoustic acquire across act action actor actress actual adapt add addict address adjust admit adult advance" after tWords
+   put " advice aerobic affair afford afraid again age agent agree ahead aim air airport aisle alarm album" after tWords
+   put " alcohol alert alien all alley allow almost alone alpha already also alter always amateur amazing among" after tWords
+   put " amount amused analyst anchor ancient anger angle angry animal ankle announce annual another answer antenna antique" after tWords
+   put " anxiety any apart apology appear apple approve april arch arctic area arena argue arm armed armor" after tWords
+   put " army around arrange arrest arrive arrow art artefact artist artwork ask aspect assault asset assist assume" after tWords
+   put " asthma athlete atom attack attend attitude attract auction audit august aunt author auto autumn average avocado" after tWords
+   put " avoid awake aware away awesome awful awkward axis baby bachelor bacon badge bag balance balcony ball" after tWords
+   put " bamboo banana banner bar barely bargain barrel base basic basket battle beach bean beauty because become" after tWords
+   put " beef before begin behave behind believe below belt bench benefit best betray better between beyond bicycle" after tWords
+   put " bid bike bind biology bird birth bitter black blade blame blanket blast bleak bless blind blood" after tWords
+   put " blossom blouse blue blur blush board boat body boil bomb bone bonus book boost border boring" after tWords
+   put " borrow boss bottom bounce box boy bracket brain brand brass brave bread breeze brick bridge brief" after tWords
+   put " bright bring brisk broccoli broken bronze broom brother brown brush bubble buddy budget buffalo build bulb" after tWords
+   put " bulk bullet bundle bunker burden burger burst bus business busy butter buyer buzz cabbage cabin cable" after tWords
+   put " cactus cage cake call calm camera camp can canal cancel candy cannon canoe canvas canyon capable" after tWords
+   put " capital captain car carbon card cargo carpet carry cart case cash casino castle casual cat catalog" after tWords
+   put " catch category cattle caught cause caution cave ceiling celery cement census century cereal certain chair chalk" after tWords
+   put " champion change chaos chapter charge chase chat cheap check cheese chef cherry chest chicken chief child" after tWords
+   put " chimney choice choose chronic chuckle chunk churn cigar cinnamon circle citizen city civil claim clap clarify" after tWords
+   put " claw clay clean clerk clever click client cliff climb clinic clip clock clog close cloth cloud" after tWords
+   put " clown club clump cluster clutch coach coast coconut code coffee coil coin collect color column combine" after tWords
+   put " come comfort comic common company concert conduct confirm congress connect consider control convince cook cool copper" after tWords
+   put " copy coral core corn correct cost cotton couch country couple course cousin cover coyote crack cradle" after tWords
+   put " craft cram crane crash crater crawl crazy cream credit creek crew cricket crime crisp critic crop" after tWords
+   put " cross crouch crowd crucial cruel cruise crumble crunch crush cry crystal cube culture cup cupboard curious" after tWords
+   put " current curtain curve cushion custom cute cycle dad damage damp dance danger daring dash daughter dawn" after tWords
+   put " day deal debate debris decade december decide decline decorate decrease deer defense define defy degree delay" after tWords
+   put " deliver demand demise denial dentist deny depart depend deposit depth deputy derive describe desert design desk" after tWords
+   put " despair destroy detail detect develop device devote diagram dial diamond diary dice diesel diet differ digital" after tWords
+   put " dignity dilemma dinner dinosaur direct dirt disagree discover disease dish dismiss disorder display distance divert divide" after tWords
+   put " divorce dizzy doctor document dog doll dolphin domain donate donkey donor door dose double dove draft" after tWords
+   put " dragon drama drastic draw dream dress drift drill drink drip drive drop drum dry duck dumb" after tWords
+   put " dune during dust dutch duty dwarf dynamic eager eagle early earn earth easily east easy echo" after tWords
+   put " ecology economy edge edit educate effort egg eight either elbow elder electric elegant element elephant elevator" after tWords
+   put " elite else embark embody embrace emerge emotion employ empower empty enable enact end endless endorse enemy" after tWords
+   put " energy enforce engage engine enhance enjoy enlist enough enrich enroll ensure enter entire entry envelope episode" after tWords
+   put " equal equip era erase erode erosion error erupt escape essay essence estate eternal ethics evidence evil" after tWords
+   put " evoke evolve exact example excess exchange excite exclude excuse execute exercise exhaust exhibit exile exist exit" after tWords
+   put " exotic expand expect expire explain expose express extend extra eye eyebrow fabric face faculty fade faint" after tWords
+   put " faith fall false fame family famous fan fancy fantasy farm fashion fat fatal father fatigue fault" after tWords
+   put " favorite feature february federal fee feed feel female fence festival fetch fever few fiber fiction field" after tWords
+   put " figure file film filter final find fine finger finish fire firm first fiscal fish fit fitness" after tWords
+   put " fix flag flame flash flat flavor flee flight flip float flock floor flower fluid flush fly" after tWords
+   put " foam focus fog foil fold follow food foot force forest forget fork fortune forum forward fossil" after tWords
+   put " foster found fox fragile frame frequent fresh friend fringe frog front frost frown frozen fruit fuel" after tWords
+   put " fun funny furnace fury future gadget gain galaxy gallery game gap garage garbage garden garlic garment" after tWords
+   put " gas gasp gate gather gauge gaze general genius genre gentle genuine gesture ghost giant gift giggle" after tWords
+   put " ginger giraffe girl give glad glance glare glass glide glimpse globe gloom glory glove glow glue" after tWords
+   put " goat goddess gold good goose gorilla gospel gossip govern gown grab grace grain grant grape grass" after tWords
+   put " gravity great green grid grief grit grocery group grow grunt guard guess guide guilt guitar gun" after tWords
+   put " gym habit hair half hammer hamster hand happy harbor hard harsh harvest hat have hawk hazard" after tWords
+   put " head health heart heavy hedgehog height hello helmet help hen hero hidden high hill hint hip" after tWords
+   put " hire history hobby hockey hold hole holiday hollow home honey hood hope horn horror horse hospital" after tWords
+   put " host hotel hour hover hub huge human humble humor hundred hungry hunt hurdle hurry hurt husband" after tWords
+   put " hybrid ice icon idea identify idle ignore ill illegal illness image imitate immense immune impact impose" after tWords
+   put " improve impulse inch include income increase index indicate indoor industry infant inflict inform inhale inherit initial" after tWords
+   put " inject injury inmate inner innocent input inquiry insane insect inside inspire install intact interest into invest" after tWords
+   put " invite involve iron island isolate issue item ivory jacket jaguar jar jazz jealous jeans jelly jewel" after tWords
+   put " job join joke journey joy judge juice jump jungle junior junk just kangaroo keen keep ketchup" after tWords
+   put " key kick kid kidney kind kingdom kiss kit kitchen kite kitten kiwi knee knife knock know" after tWords
+   put " lab label labor ladder lady lake lamp language laptop large later latin laugh laundry lava law" after tWords
+   put " lawn lawsuit layer lazy leader leaf learn leave lecture left leg legal legend leisure lemon lend" after tWords
+   put " length lens leopard lesson letter level liar liberty library license life lift light like limb limit" after tWords
+   put " link lion liquid list little live lizard load loan lobster local lock logic lonely long loop" after tWords
+   put " lottery loud lounge love loyal lucky luggage lumber lunar lunch luxury lyrics machine mad magic magnet" after tWords
+   put " maid mail main major make mammal man manage mandate mango mansion manual maple marble march margin" after tWords
+   put " marine market marriage mask mass master match material math matrix matter maximum maze meadow mean measure" after tWords
+   put " meat mechanic medal media melody melt member memory mention menu mercy merge merit merry mesh message" after tWords
+   put " metal method middle midnight milk million mimic mind minimum minor minute miracle mirror misery miss mistake" after tWords
+   put " mix mixed mixture mobile model modify mom moment monitor monkey monster month moon moral more morning" after tWords
+   put " mosquito mother motion motor mountain mouse move movie much muffin mule multiply muscle museum mushroom music" after tWords
+   put " must mutual myself mystery myth naive name napkin narrow nasty nation nature near neck need negative" after tWords
+   put " neglect neither nephew nerve nest net network neutral never news next nice night noble noise nominee" after tWords
+   put " noodle normal north nose notable note nothing notice novel now nuclear number nurse nut oak obey" after tWords
+   put " object oblige obscure observe obtain obvious occur ocean october odor off offer office often oil okay" after tWords
+   put " old olive olympic omit once one onion online only open opera opinion oppose option orange orbit" after tWords
+   put " orchard order ordinary organ orient original orphan ostrich other outdoor outer output outside oval oven over" after tWords
+   put " own owner oxygen oyster ozone pact paddle page pair palace palm panda panel panic panther paper" after tWords
+   put " parade parent park parrot party pass patch path patient patrol pattern pause pave payment peace peanut" after tWords
+   put " pear peasant pelican pen penalty pencil people pepper perfect permit person pet phone photo phrase physical" after tWords
+   put " piano picnic picture piece pig pigeon pill pilot pink pioneer pipe pistol pitch pizza place planet" after tWords
+   put " plastic plate play please pledge pluck plug plunge poem poet point polar pole police pond pony" after tWords
+   put " pool popular portion position possible post potato pottery poverty powder power practice praise predict prefer prepare" after tWords
+   put " present pretty prevent price pride primary print priority prison private prize problem process produce profit program" after tWords
+   put " project promote proof property prosper protect proud provide public pudding pull pulp pulse pumpkin punch pupil" after tWords
+   put " puppy purchase purity purpose purse push put puzzle pyramid quality quantum quarter question quick quit quiz" after tWords
+   put " quote rabbit raccoon race rack radar radio rail rain raise rally ramp ranch random range rapid" after tWords
+   put " rare rate rather raven raw razor ready real reason rebel rebuild recall receive recipe record recycle" after tWords
+   put " reduce reflect reform refuse region regret regular reject relax release relief rely remain remember remind remove" after tWords
+   put " render renew rent reopen repair repeat replace report require rescue resemble resist resource response result retire" after tWords
+   put " retreat return reunion reveal review reward rhythm rib ribbon rice rich ride ridge rifle right rigid" after tWords
+   put " ring riot ripple risk ritual rival river road roast robot robust rocket romance roof rookie room" after tWords
+   put " rose rotate rough round route royal rubber rude rug rule run runway rural sad saddle sadness" after tWords
+   put " safe sail salad salmon salon salt salute same sample sand satisfy satoshi sauce sausage save say" after tWords
+   put " scale scan scare scatter scene scheme school science scissors scorpion scout scrap screen script scrub sea" after tWords
+   put " search season seat second secret section security seed seek segment select sell seminar senior sense sentence" after tWords
+   put " series service session settle setup seven shadow shaft shallow share shed shell sheriff shield shift shine" after tWords
+   put " ship shiver shock shoe shoot shop short shoulder shove shrimp shrug shuffle shy sibling sick side" after tWords
+   put " siege sight sign silent silk silly silver similar simple since sing siren sister situate six size" after tWords
+   put " skate sketch ski skill skin skirt skull slab slam sleep slender slice slide slight slim slogan" after tWords
+   put " slot slow slush small smart smile smoke smooth snack snake snap sniff snow soap soccer social" after tWords
+   put " sock soda soft solar soldier solid solution solve someone song soon sorry sort soul sound soup" after tWords
+   put " source south space spare spatial spawn speak special speed spell spend sphere spice spider spike spin" after tWords
+   put " spirit split spoil sponsor spoon sport spot spray spread spring spy square squeeze squirrel stable stadium" after tWords
+   put " staff stage stairs stamp stand start state stay steak steel stem step stereo stick still sting" after tWords
+   put " stock stomach stone stool story stove strategy street strike strong struggle student stuff stumble style subject" after tWords
+   put " submit subway success such sudden suffer sugar suggest suit summer sun sunny sunset super supply supreme" after tWords
+   put " sure surface surge surprise surround survey suspect sustain swallow swamp swap swarm swear sweet swift swim" after tWords
+   put " swing switch sword symbol symptom syrup system table tackle tag tail talent talk tank tape target" after tWords
+   put " task taste tattoo taxi teach team tell ten tenant tennis tent term test text thank that" after tWords
+   put " theme then theory there they thing this thought three thrive throw thumb thunder ticket tide tiger" after tWords
+   put " tilt timber time tiny tip tired tissue title toast tobacco today toddler toe together toilet token" after tWords
+   put " tomato tomorrow tone tongue tonight tool tooth top topic topple torch tornado tortoise toss total tourist" after tWords
+   put " toward tower town toy track trade traffic tragic train transfer trap trash travel tray treat tree" after tWords
+   put " trend trial tribe trick trigger trim trip trophy trouble truck true truly trumpet trust truth try" after tWords
+   put " tube tuition tumble tuna tunnel turkey turn turtle twelve twenty twice twin twist two type typical" after tWords
+   put " ugly umbrella unable unaware uncle uncover under undo unfair unfold unhappy uniform unique unit universe unknown" after tWords
+   put " unlock until unusual unveil update upgrade uphold upon upper upset urban urge usage use used useful" after tWords
+   put " useless usual utility vacant vacuum vague valid valley valve van vanish vapor various vast vault vehicle" after tWords
+   put " velvet vendor venture venue verb verify version very vessel veteran viable vibrant vicious victory video view" after tWords
+   put " village vintage violin virtual virus visa visit visual vital vivid vocal voice void volcano volume vote" after tWords
+   put " voyage wage wagon wait walk wall walnut want warfare warm warrior wash wasp waste water wave" after tWords
+   put " way wealth weapon wear weasel weather web wedding weekend weird welcome west wet whale what wheat" after tWords
+   put " wheel when where whip whisper wide width wife wild will win window wine wing wink winner" after tWords
+   put " winter wire wisdom wise wish witness wolf woman wonder wood wool word work world worry worth" after tWords
+   put " wrap wreck wrestle wrist write wrong yard year yellow you young youth zebra zero zone zoo" after tWords
+   replace space with return in tWords
+   put tWords into sBip39List
+end cxBip39Ensure
+
+-- entropy (16, 20, 24, 28, or 32 bytes) -> a space-joined BIP-39 mnemonic.
+-- The checksum is the top ENT/32 bits of sha256(entropy); the entropy+checksum
+-- bit stream is split into 11-bit word indices (a MASKED accumulator, never
+-- past 2^19).
+function cxMnemonicFromEntropy pEntropy
+   local tEntLen
+   local tCsBits
+   local tNumWords
+   local tHash
+   local tFull
+   local tAcc
+   local tBits
+   local tByteIdx
+   local tIdx
+   local tOut
+   put the number of bytes in pEntropy into tEntLen
+   if tEntLen < 16 or tEntLen > 32 or (tEntLen mod 4) is not 0 then
+      return "CoinXT: BIP-39 entropy must be 16, 20, 24, 28, or 32 bytes (cxMnemonicFromEntropy)"
+   end if
+   put (tEntLen * 8) div 32 into tCsBits
+   put ((tEntLen * 8) + tCsBits) div 11 into tNumWords
+   put cxSha256(pEntropy) into tHash
+   if cxIsError(tHash) then
+      return tHash && "(cxMnemonicFromEntropy)"
+   end if
+   put pEntropy & (byte 1 of tHash) into tFull
+   cxBip39Ensure
+   put 0 into tAcc
+   put 0 into tBits
+   put 1 into tByteIdx
+   put empty into tOut
+   repeat tNumWords times
+      repeat while tBits < 11
+         put (tAcc * 256) + byteToNum(byte tByteIdx of tFull) into tAcc
+         add 1 to tByteIdx
+         add 8 to tBits
+      end repeat
+      subtract 11 from tBits
+      put tAcc div cxPow2(tBits) into tIdx
+      put tIdx mod 2048 into tIdx
+      put tAcc mod cxPow2(tBits) into tAcc
+      if tOut is empty then
+         put line (tIdx + 1) of sBip39List into tOut
+      else
+         put space & (line (tIdx + 1) of sBip39List) after tOut
+      end if
+   end repeat
+   return tOut
+end cxMnemonicFromEntropy
+
+-- true only if pWords is a valid BIP-39 mnemonic (known words AND the checksum
+-- verifies); every malformed input is false (fail closed)
+function cxMnemonicValidate pWords
+   local tNumWords
+   local tSaved
+   local tPos
+   local tAcc
+   local tBits
+   local tBitBytes
+   local tByteVal
+   local tEntBytes
+   local tEntropy
+   local tChecksumVal
+   local tCsBits
+   local tHash
+   local tWant
+   local tIdx
+   put the number of words in pWords into tNumWords
+   if tNumWords is not 12 and tNumWords is not 15 and tNumWords is not 18 and tNumWords is not 21 and tNumWords is not 24 then
+      return false
+   end if
+   cxBip39Ensure
+   put the wholeMatches into tSaved
+   set the wholeMatches to true
+   put 0 into tAcc
+   put 0 into tBits
+   put empty into tBitBytes
+   repeat with tIdx = 1 to tNumWords
+      put lineOffset(word tIdx of pWords, sBip39List) into tPos
+      if tPos is 0 then
+         set the wholeMatches to tSaved
+         return false
+      end if
+      put (tAcc * 2048) + (tPos - 1) into tAcc
+      add 11 to tBits
+      repeat while tBits >= 8
+         subtract 8 from tBits
+         put tAcc div cxPow2(tBits) into tByteVal
+         put tByteVal mod 256 into tByteVal
+         put numToByte(tByteVal) after tBitBytes
+         put tAcc mod cxPow2(tBits) into tAcc
+      end repeat
+   end repeat
+   set the wholeMatches to tSaved
+   put (tNumWords * 4) div 3 into tEntBytes
+   put byte 1 to tEntBytes of tBitBytes into tEntropy
+   if tBits > 0 then
+      put tAcc into tChecksumVal
+      put tBits into tCsBits
+   else
+      put byteToNum(byte (tEntBytes + 1) of tBitBytes) into tChecksumVal
+      put 8 into tCsBits
+   end if
+   put cxSha256(tEntropy) into tHash
+   if cxIsError(tHash) then
+      return false
+   end if
+   put byteToNum(byte 1 of tHash) div cxPow2(8 - tCsBits) into tWant
+   if tChecksumVal is tWant then
+      return true
+   end if
+   return false
+end cxMnemonicValidate
+
+-- mnemonic + optional passphrase -> the 64-byte BIP-39 seed (the BIP-32 master
+-- seed). PBKDF2-HMAC-SHA512, 2048 iterations, salt "mnemonic" + passphrase.
+function cxMnemonicToSeed pWords, pPassphrase
+   return cxPbkdf2HmacSha512(textEncode(pWords, "utf-8"), textEncode("mnemonic" & pPassphrase, "utf-8"), 2048, 64)
+end cxMnemonicToSeed
