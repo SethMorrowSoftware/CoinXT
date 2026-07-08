@@ -212,7 +212,9 @@ Encodings (PURE SCRIPT, pinned by KAT):
   cxBase58CheckEncode(pVersion, pPayload) / cxBase58CheckDecode(pString)   (fails closed on bad checksum)
   cxBech32Encode(pHrp, pWitVer, pProgram) / cxBech32Decode(pString)        (Bech32 and Bech32m)
   cxWifEncode(pSeckey, pCompressed, pMainnet) / cxWifDecode(pWif)          (WIF private-key form)
-  cxRlpEncode(pList) / cxRlpDecode(pBytes)                                 [Ethereum tx]
+  cxRlpBytes(pData) / cxRlpList(pPayload)                                  [Ethereum tx; COMPOSABLE:
+  cxRlpUIntBytes(pBytes) / cxRlpUIntDec(pDecimalString)                     encode items, concatenate,
+                                                                            wrap; decode deferred]
 
 Addresses (compose the above):
   cxBtcAddressP2PKH(pPubkey, pMainnet)    -> Base58Check(0x00 || hash160(pubkey))

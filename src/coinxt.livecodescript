@@ -966,6 +966,103 @@ function cxWifDecode pWif
    return tOut
 end cxWifDecode
 
+-- ---- RLP (recursive length prefix; the Ethereum serialization) ----
+--
+-- COMPOSABLE encoders, so no nested list structure ever crosses an API:
+-- encode each item with cxRlpBytes / cxRlpUIntBytes / cxRlpUIntDec,
+-- concatenate the encoded items, then wrap the concatenation with
+-- cxRlpList (nest by wrapping again). RLP integers are MINIMAL big-endian
+-- (zero is the empty string); a single byte below 0x80 is its own
+-- encoding. Pinned to the yellow-paper vectors AND the official EIP-155
+-- example transaction in tools/coin-kat.py; the on-engine harness
+-- (testRlp / testEthTx) re-runs both through this exact layer.
+
+-- the shared length header: pBase is 128 (0x80) for a byte string,
+-- 192 (0xC0) for a list; over 55 bytes the length itself is length-prefixed
+private function cxRlpHeader pBase, pLen
+   local tLenBytes
+   local tN
+   if pLen <= 55 then
+      return numToByte(pBase + pLen)
+   end if
+   put empty into tLenBytes
+   put pLen into tN
+   repeat while tN > 0
+      put numToByte(tN mod 256) before tLenBytes
+      put tN div 256 into tN
+   end repeat
+   return numToByte(pBase + 55 + the number of bytes in tLenBytes) & tLenBytes
+end cxRlpHeader
+
+-- RLP of a byte string (Data). A single byte below 0x80 IS its encoding.
+function cxRlpBytes pData
+   if the number of bytes in pData is 1 and byteToNum(byte 1 of pData) < 128 then
+      return pData
+   end if
+   return cxRlpHeader(128, the number of bytes in pData) & pData
+end cxRlpBytes
+
+-- RLP list wrap: pPayload is the CONCATENATION of already-encoded items
+-- (pass empty for the empty list, 0xC0).
+function cxRlpList pPayload
+   return cxRlpHeader(192, the number of bytes in pPayload) & pPayload
+end cxRlpList
+
+-- RLP of an unsigned integer given as big-endian BYTES: leading zero bytes
+-- are stripped (RLP integers are minimal; zero is the empty string). Use
+-- for a quantity that is already binary, like a signature's r or s.
+function cxRlpUIntBytes pData
+   local tIdx
+   local tStart
+   put 0 into tStart
+   repeat with tIdx = 1 to the number of bytes in pData
+      if byteToNum(byte tIdx of pData) is not 0 then
+         put tIdx into tStart
+         exit repeat
+      end if
+   end repeat
+   if tStart is 0 then
+      return cxRlpBytes(empty)
+   end if
+   return cxRlpBytes(byte tStart to -1 of pData)
+end cxRlpUIntBytes
+
+-- RLP of an unsigned integer given as a DECIMAL string of ANY size (a wei
+-- amount is far past 2^53, so no script integer is ever formed): the same
+-- byte-array multiply-accumulate cxB58Encode uses, every intermediate
+-- bounded. Fails closed on a non-digit; empty and "0" both encode as 0x80.
+function cxRlpUIntDec pDecimal
+   local tBuf
+   local tIdx
+   local tJ
+   local tDigit
+   local tCarry
+   local tOut
+   put empty into tBuf
+   repeat with tIdx = 1 to the number of chars in pDecimal
+      put charToNum(char tIdx of pDecimal) - 48 into tDigit
+      if tDigit < 0 or tDigit > 9 then
+         return "CoinXT: not a decimal digit (cxRlpUIntDec)"
+      end if
+      put tDigit into tCarry
+      repeat with tJ = 1 to the number of bytes in tBuf
+         put (byteToNum(byte tJ of tBuf) * 10) + tCarry into tCarry
+         put numToByte(tCarry mod 256) into byte tJ of tBuf
+         put tCarry div 256 into tCarry
+      end repeat
+      repeat while tCarry > 0
+         put numToByte(tCarry mod 256) after tBuf
+         put tCarry div 256 into tCarry
+      end repeat
+   end repeat
+   -- tBuf is little-endian; emit big-endian
+   put empty into tOut
+   repeat with tIdx = (the number of bytes in tBuf) down to 1
+      put byte tIdx of tBuf after tOut
+   end repeat
+   return cxRlpUIntBytes(tOut)
+end cxRlpUIntDec
+
 --
 -- entropy <-> words + the checksum word are pure bytes over cxSha256; the
 -- mnemonic -> seed step is PBKDF2-HMAC-SHA512 (cxPbkdf2HmacSha512), 2048

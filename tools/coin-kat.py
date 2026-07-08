@@ -1205,6 +1205,115 @@ def run_phase5_encoder_checks(lib, kat):
 
 
 # ---------------------------------------------------------------------------
+# RLP (the Ethereum serialization) and the EIP-155 offline transaction. The
+# script layer's composable encoders (cxRlpBytes / cxRlpList / cxRlpUIntBytes
+# / cxRlpUIntDec) are mirrored 1:1 below and locked to the yellow-paper
+# vectors; then the OFFICIAL EIP-155 example transaction (the one printed in
+# the EIP: key 0x46..46, nonce 9, 20 gwei, 21000 gas, to 0x3535..35, 1 ETH,
+# chain 1) is rebuilt with these mirrors + the SHIM's keccak and recoverable
+# signer, and must reproduce the published signing hash, r, s, v = 37, and
+# the full raw tx byte for byte. That anchors the whole offline-signing
+# chain: RLP -> keccak -> RFC 6979 sign -> EIP-155 v -> RLP again.
+EIP155_KEY = bytes.fromhex("46" * 32)
+EIP155_SIGHASH = \
+    "daf5a779ae972f972197303d7b574746c7ef83eadac0f2791ad23db92e4c8e53"
+EIP155_R = "28ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276"
+EIP155_S = "67cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83"
+EIP155_RAW = (
+    "f86c098504a817c800825208943535353535353535353535353535353535353535"
+    "880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c"
+    "71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc"
+    "64214b297fb1966a3b6d83")
+
+
+def _rlp_header(base, n):
+    if n <= 55:
+        return bytes([base + n])
+    lenbytes = b""
+    while n:
+        lenbytes = bytes([n % 256]) + lenbytes
+        n //= 256
+    return bytes([base + 55 + len(lenbytes)]) + lenbytes
+
+
+def _rlp_bytes(b):
+    if len(b) == 1 and b[0] < 0x80:
+        return b
+    return _rlp_header(0x80, len(b)) + b
+
+
+def _rlp_list(payload):
+    return _rlp_header(0xC0, len(payload)) + payload
+
+
+def _rlp_uint_bytes(b):
+    return _rlp_bytes(b.lstrip(b"\x00"))
+
+
+def _rlp_uint_dec(dec):
+    # the script's byte-array multiply-accumulate, digit for digit
+    buf = []
+    for ch in dec:
+        carry = ord(ch) - 48
+        for j in range(len(buf)):
+            v = buf[j] * 10 + carry
+            buf[j] = v % 256
+            carry = v // 256
+        while carry:
+            buf.append(carry % 256)
+            carry //= 256
+    return _rlp_uint_bytes(bytes(reversed(buf)))
+
+
+def run_rlp_eip155_checks(lib, kat):
+    lorem = b"Lorem ipsum dolor sit amet, consectetur adipisicing elit"
+    vectors = [
+        (_rlp_bytes(b"dog"), "83646f67"),
+        (_rlp_list(_rlp_bytes(b"cat") + _rlp_bytes(b"dog")),
+         "c88363617483646f67"),
+        (_rlp_bytes(b""), "80"),
+        (_rlp_list(b""), "c0"),
+        (_rlp_uint_dec("0"), "80"),
+        (_rlp_bytes(b"\x0f"), "0f"),
+        (_rlp_uint_dec("1024"), "820400"),
+        (_rlp_uint_bytes(b"\x00\x00\x04\x00"), "820400"),
+        (_rlp_uint_dec("1000000000000000000"), "880de0b6b3a7640000"),
+        (_rlp_bytes(lorem),
+         "b8384c6f72656d20697073756d20646f6c6f722073697420616d65742c20636f6e"
+         "7365637465747572206164697069736963696e6720656c6974"),
+        # the set-theoretical representation of three: [ [], [[]], [ [], [[]] ] ]
+        (_rlp_list(_rlp_list(b"") + _rlp_list(_rlp_list(b""))
+                   + _rlp_list(_rlp_list(b"") + _rlp_list(_rlp_list(b"")))),
+         "c7c0c1c0c3c0c1c0"),
+    ]
+    for got, want in vectors:
+        kat.check(f"RLP vector {want[:16]}", got.hex() == want, got.hex())
+    # the official EIP-155 example, end to end through the shim
+    items = (_rlp_uint_dec("9") + _rlp_uint_dec("20000000000")
+             + _rlp_uint_dec("21000")
+             + _rlp_bytes(bytes.fromhex("35" * 20))
+             + _rlp_uint_dec("1000000000000000000") + _rlp_bytes(b""))
+    preimage = _rlp_list(items + _rlp_uint_dec("1")
+                         + _rlp_uint_dec("0") + _rlp_uint_dec("0"))
+    sighash = digest(lib, "cnx_keccak256", preimage)
+    kat.check("EIP-155 signing hash", sighash.hex() == EIP155_SIGHASH,
+              sighash.hex())
+    sig = ctypes.create_string_buffer(65)
+    rc = lib.cnx_ecdsa_sign_recoverable(EIP155_KEY, sighash, sig)
+    kat.check("EIP-155 r matches the published example",
+              rc == 0 and sig.raw[:32].hex() == EIP155_R)
+    kat.check("EIP-155 s matches the published example",
+              rc == 0 and sig.raw[32:64].hex() == EIP155_S)
+    v = 35 + 2 * 1 + sig.raw[64]
+    kat.check("EIP-155 v = 37", v == 37, str(v))
+    raw = _rlp_list(items + _rlp_uint_dec(str(v))
+                    + _rlp_uint_bytes(sig.raw[:32])
+                    + _rlp_uint_bytes(sig.raw[32:64]))
+    kat.check("EIP-155 raw signed tx byte-identical to the EIP's example",
+              raw.hex() == EIP155_RAW, raw.hex())
+
+
+# ---------------------------------------------------------------------------
 # The wallet-restore path (the demo's headline feature): the canonical BIP-39
 # test mnemonic restores, through the SHIM's real HD-node derivation, to the
 # OFFICIAL BIP-84 and BIP-86 first addresses (those two strings are printed
@@ -1222,6 +1331,15 @@ RESTORE_VECTORS = {
     "m/86'/0'/0'/0/0": ("p2tr",
                         "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"),
     "m/44'/60'/0'/0/0": ("eth", "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"),
+    # the demo's fidelity listing shows receive #0..#9 and change #0; the
+    # second receive and the first change address are ALSO printed in BIP-84
+    # itself, and eth #1 is the widely published second account, so the
+    # listing's continuation is anchored too, not just its first row
+    "m/84'/0'/0'/0/1": ("p2wpkh",
+                        "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g"),
+    "m/84'/0'/0'/1/0": ("p2wpkh",
+                        "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el"),
+    "m/44'/60'/0'/0/1": ("eth", "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0"),
 }
 RESTORE_ACCOUNT_XPUB = (
     "m/84'/0'/0'",
@@ -1310,6 +1428,7 @@ def main(argv):
         run_schnorr_checks(lib, kat)
         run_taproot_checks(lib, kat)
         run_phase5_encoder_checks(lib, kat)
+        run_rlp_eip155_checks(lib, kat)
         run_restore_checks(lib, kat)
 
     if kat.problems:

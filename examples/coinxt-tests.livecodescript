@@ -86,6 +86,16 @@ constant kRestA86 = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqked
 constant kRestAEth = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
 constant kRestXpub84 = "xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAPshWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V"
 constant kRestWif84 = "KyZpNDKnfs94vbrwhJneDi77V6jF64PWPF8x5cdJb8ifgg2DUc9d"
+-- the fidelity listing's continuation: receive #1 and change #0 are printed
+-- in BIP-84 itself; eth #1 is the widely published second account
+constant kRestA84_1 = "bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g"
+constant kRestA84Chg = "bc1q8c6fshw2dlwun7ekn9qwf37cu2rn755upcp6el"
+constant kRestAEth1 = "0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0"
+-- the OFFICIAL EIP-155 example transaction (printed in the EIP itself):
+-- signing key, signing hash, and the full raw signed tx it must produce
+constant kTxKey = "4646464646464646464646464646464646464646464646464646464646464646"
+constant kTxHash = "daf5a779ae972f972197303d7b574746c7ef83eadac0f2791ad23db92e4c8e53"
+constant kTxRaw = "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83"
 
 function cxSelfTest
    local tAbi
@@ -136,6 +146,8 @@ function cxSelfTest
    testWif
    testBech32Decode
    testEthPersonal
+   testRlp
+   testEthTx
    testMnemonics
    testHd
    testSchnorr
@@ -437,6 +449,52 @@ on testEthPersonal
       "personal_sign -> ecrecover recovers the signer's ADDRESS"
 end testEthPersonal
 
+on testRlp
+   cxtSection "RLP (yellow-paper vectors)"
+   cxtCheck (cxHexEncode(cxRlpBytes(cxtAscii("dog"))) is "83646f67"), \
+      "rlp(dog) matches the yellow paper"
+   cxtCheck (cxHexEncode(cxRlpList(cxRlpBytes(cxtAscii("cat")) & cxRlpBytes(cxtAscii("dog")))) is \
+      "c88363617483646f67"), "rlp([cat, dog]) matches the yellow paper"
+   cxtCheck (cxHexEncode(cxRlpBytes(empty)) is "80"), "rlp of the empty string is 0x80"
+   cxtCheck (cxHexEncode(cxRlpList(empty)) is "c0"), "rlp of the empty list is 0xc0"
+   cxtCheck (cxHexEncode(cxRlpUIntDec("0")) is "80"), "the integer 0 is the empty string"
+   cxtCheck (cxHexEncode(cxRlpUIntDec("15")) is "0f"), "a single byte below 0x80 is its own encoding"
+   cxtCheck (cxHexEncode(cxRlpUIntDec("1024")) is "820400"), "rlp(1024) matches the yellow paper"
+   cxtCheck (cxHexEncode(cxRlpUIntDec("1000000000000000000")) is "880de0b6b3a7640000"), \
+      "a wei amount far past 2^53 encodes exactly (no precision loss)"
+   cxtCheck (cxHexEncode(cxRlpUIntBytes(cxtBin("0000040000"))) is "83040000"), \
+      "leading zero bytes are stripped (minimal integer)"
+   cxtCheck cxIsError(cxRlpUIntDec("12a4")), "a non-digit is rejected (fail closed)"
+end testRlp
+
+-- the offline-signing chain, end to end: RLP -> keccak -> recoverable sign
+-- -> EIP-155 v -> RLP again, against the official example printed in the EIP
+on testEthTx
+   local tSk
+   local tItems
+   local tPreimage
+   local tHash
+   local tSig
+   local tV
+   local tRaw
+   cxtSection "EIP-155 offline transaction (the official example)"
+   put cxtBin(kTxKey) into tSk
+   put cxRlpUIntDec("9") & cxRlpUIntDec("20000000000") & cxRlpUIntDec("21000") \
+      & cxRlpBytes(cxtBin("3535353535353535353535353535353535353535")) \
+      & cxRlpUIntDec("1000000000000000000") & cxRlpBytes(empty) into tItems
+   put cxRlpList(tItems & cxRlpUIntDec("1") & cxRlpUIntDec("0") & cxRlpUIntDec("0")) into tPreimage
+   put cxKeccak256(tPreimage) into tHash
+   cxtCheck (cxtHex(tHash) is kTxHash), "the signing hash matches the EIP-155 value"
+   put cxSignRecoverable(tSk, tHash) into tSig
+   put 35 + 2 + byteToNum(byte 65 of tSig) into tV
+   cxtCheck (tV is 37), "v = 37 (chain 1, the EIP-155 offset)"
+   put cxRlpList(tItems & cxRlpUIntDec(tV) & cxRlpUIntBytes(byte 1 to 32 of tSig) \
+      & cxRlpUIntBytes(byte 33 to 64 of tSig)) into tRaw
+   cxtCheck (cxHexEncode(tRaw) is kTxRaw), \
+      "the raw signed tx is byte-identical to the EIP's published example"
+   put empty into tSk
+end testEthTx
+
 -- the demo's headline flow, end to end on-engine: the canonical mnemonic
 -- restores to the published first addresses of every standard path (the
 -- BIP-84/86 strings are the official BIP test vectors)
@@ -444,6 +502,7 @@ on testRestore
    local tSeed
    local tMaster
    local tNode
+   local tChild
    local tKey
    cxtSection "wallet restore (canonical mnemonic -> published addresses)"
    put cxMnemonicToSeed(kMnem128, empty) into tSeed
@@ -475,6 +534,19 @@ on testRestore
    put cxHdDerivePath(tMaster, "m/84'/0'/0'") into tNode
    cxtCheck (cxXpub(tNode, true) is kRestXpub84), \
       "the BIP-84 account xpub matches the locked vector"
+   -- the fidelity listing's continuation, derived the way the demo derives
+   -- #0..#9: one cached chain node, then cxHdDerive per index
+   put cxHdDerivePath(tMaster, "m/84'/0'/0'/0") into tNode
+   put cxHdDerive(tNode, 1, false) into tChild
+   cxtCheck (cxBtcAddressP2WPKH(cxHdPubkey(tChild), true) is kRestA84_1), \
+      "receive #1 is BIP-84's published second address"
+   put cxHdDerivePath(tMaster, "m/84'/0'/0'/1/0") into tChild
+   cxtCheck (cxBtcAddressP2WPKH(cxHdPubkey(tChild), true) is kRestA84Chg), \
+      "change #0 is BIP-84's published first change address"
+   put cxHdDerivePath(tMaster, "m/44'/60'/0'/0/1") into tChild
+   cxtCheck (cxEthAddress(cxHdPubkey(tChild)) is kRestAEth1), \
+      "eth #1 is the published second account"
+   put empty into tChild
    put empty into tNode
    put empty into tMaster
 end testRestore

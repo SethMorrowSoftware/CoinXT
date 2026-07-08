@@ -561,3 +561,35 @@ ABI 3).
 - Honest status: headless-verified and vector-locked everywhere Python can reach; the new script
   paths and demo tabs NEED AN ON-ENGINE PASS (the new harness sections are the checklist; expect the
   count to grow from 74 to about 100).
+
+**Phase 5b - RLP, the EIP-155 offline transaction, and the fidelity-listing round (2026-07-08).**
+Still pure script: no native change, ABI 3, binaries untouched. This round makes the demo prove the
+whole offline-signing chain and lets a restore be checked against another wallet at a glance:
+
+- New public API: `cxRlpBytes` / `cxRlpList` / `cxRlpUIntBytes` / `cxRlpUIntDec`. The design is
+  COMPOSABLE (encode each item, concatenate, wrap with `cxRlpList`; nest by wrapping again) so no
+  nested list structure ever crosses an API boundary - this supersedes SPEC's earlier
+  `cxRlpEncode(pList)` sketch, and `cxRlpDecode` is deferred until a consumer needs it.
+  `cxRlpUIntDec` takes a DECIMAL string of any size (a wei amount is far past 2^53) and converts via
+  the cxB58Encode byte-array multiply-accumulate, so no big integer is ever formed; it fails closed
+  on a non-digit. Locked to the yellow-paper vectors in coin-kat and on-engine (`testRlp`).
+- **The EIP-155 anchor:** the official example transaction printed in the EIP itself (key 0x46..46,
+  nonce 9, 20 gwei, 21000 gas, to 0x3535..35, 1 ETH, chain 1) is reproduced BYTE FOR BYTE through
+  the shim - signing hash, r, s, v=37, and the full raw tx - in coin-kat
+  (`run_rlp_eip155_checks`), on-engine (`testEthTx`), and the demo self-test. That pins the whole
+  chain: RLP -> keccak -> RFC 6979 recoverable sign -> EIP-155 v -> RLP reassembly. (Verified
+  before pinning: the shim's deterministic signature IS the EIP's published r/s.)
+- The demo's ETH tab builds and signs a complete EIP-155 transaction from ON-SCREEN fields - the
+  confirm-before-sign posture rule 3 requires (the tx composition lives in the app layer; the
+  library only encodes, hashes, signs). The to-address is EIP-55-gated: a wrong mixed-case checksum
+  refuses to sign; single-case is accepted (it carries no checksum).
+- The Wallet tab's restore now prints a TEN-address fidelity listing per chain (segwit receive
+  #0..#9 plus change #0, eth accounts #0..#9), derived one `cxHdDerive` step at a time from a
+  cached chain node, plus the account xprv beside the xpub (with its warning). The listing's
+  continuation is anchored, not just row #0: receive #1 and change #0 are printed in BIP-84
+  itself, and eth #1 is the published second account - all three pinned in coin-kat's
+  RESTORE_VECTORS and re-run in `testRestore`.
+- Keys shows the x-only (BIP-340) key form; Hashes adds the HMAC-SHA256/512 lines.
+- Honest status: same as phase 5 - headless-verified and vector-locked everywhere Python can
+  reach; the new script paths NEED AN ON-ENGINE PASS (`testRlp` / `testEthTx` / the extended
+  `testRestore` are the checklist).
