@@ -428,6 +428,12 @@ private function cxB58Decode pString
    local tJ
    local tPos
    local tOut
+   -- MONEY-CRITICAL: the Base58 alphabet is case-DISTINCT (an uppercase and a
+   -- lowercase letter are different digits), but `offset` and `is` default to
+   -- caseSensitive FALSE, which would collide them (a lowercase "g" would match
+   -- the uppercase "G" that comes first in the alphabet) and decode the wrong
+   -- bytes. caseSensitive is local to this handler and reverts on exit.
+   set the caseSensitive to true
    put "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" into tAlpha
    put 0 into tOnes
    repeat with tIdx = 1 to the number of chars in pString
@@ -484,6 +490,10 @@ function cxBase58CheckDecode pString
    local tBody
    local tWant
    local tGot
+   -- the checksum compare below must be byte-exact; caseSensitive defaults to
+   -- FALSE, which would fold ASCII-case-equivalent checksum bytes together and
+   -- could accept a bad checksum. Local to this handler, reverts on exit.
+   set the caseSensitive to true
    put cxB58Decode(pString) into tRaw
    if cxIsError(tRaw) then
       return tRaw && "(cxBase58CheckDecode)"

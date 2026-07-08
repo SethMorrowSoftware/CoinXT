@@ -133,6 +133,15 @@ on-engine pass. Keep both gates green in CI on every push / PR.
 9. **Socket / control ids are the engine's, not yours.** `open socket to host` and `accept connections`
    name sockets by their `host:port` string (with a numeric or `|`-suffix for multiples). Store the EXACT
    id the engine hands you and use it verbatim in `read` / `write` / `close`; never reconstruct it.
+10. **`the caseSensitive` defaults to FALSE, and it silently corrupts `offset` / `is` / `contains` on
+    case-DISTINCT data.** Comparisons and `offset` fold `A`==`a` by default. On a Base58 alphabet (where
+    an uppercase and a lowercase letter are DIFFERENT digits) an `offset` lookup returns the wrong index
+    (a lowercase `g` matches the earlier uppercase `G`), so the decode produces wrong bytes; on a
+    byte-exact checksum compare it can accept a bad checksum. `set the caseSensitive to true` right where
+    you index an alphabet or compare bytes. It is a LOCAL property (reverts on handler exit), so an early
+    return needs no manual restore - but a *sibling* handler that also compares must set it too. (CONFIRMED
+    on-engine in CoinXT: Base58Check decode returned the wrong payload until this was set; encode was fine
+    because it indexes the alphabet directly instead of via `offset`.)
 
 ## 6. Operators that look like functions (and vice versa)
 
