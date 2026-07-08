@@ -73,8 +73,9 @@ CoinXT/
     check-livecodescript.py the static gate for .lcb / .livecodescript (carried verbatim)
     check-docs-style.py     the house-style gate for .md (carried verbatim)
   examples/
-    coinxt-demo.livecodescript    the self-building showcase stack (keys, sign/verify/tamper,
-                                  ecrecover, ECDH, the Keccak-vs-SHA3 footgun)
+    coinxt-demo.livecodescript    the self-building showcase stack: a branded, tabbed UI
+                                  (keys, sign/verify/tamper, ecrecover, ECDH, the Keccak-vs-SHA3
+                                  footgun, HMAC/PBKDF2 BIP-39 seed, and a one-click self-test)
     coinxt-tests.livecodescript   the on-engine self-test harness: put cxSelfTest()
 ```
 
