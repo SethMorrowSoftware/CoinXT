@@ -42,7 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 NATIVE = os.path.normpath(os.path.join(HERE, "..", "native"))
 VENDOR = os.path.join(NATIVE, "vendor")
 
-ABI_EXPECTED = 2
+ABI_EXPECTED = 3
 
 # The independent external implementation for the curve cross-checks. Optional:
 # sections that need it skip cleanly when it is absent.
@@ -153,6 +153,12 @@ def load(out_path):
         "cnx_ecdsa_sign_recoverable": [buf, buf, buf],
         "cnx_ecdsa_recover": [buf, buf, buf],
         "cnx_ecdh": [buf, buf, size, buf],
+        # HD (BIP-32) nodes
+        "cnx_hdnode_from_seed": [buf, size, buf],
+        "cnx_hdnode_derive": [buf, cint, cint, buf],
+        "cnx_hdnode_private_key": [buf, buf],
+        "cnx_hdnode_public_key": [buf, buf],
+        "cnx_hdnode_chaincode": [buf, buf],
         # hygiene
         "cnx_wipe": [buf, size],
     }
@@ -656,6 +662,66 @@ def run_bip39_checks(lib, kat):
                   to_seed(exp_mnem, "TREZOR") == exp_seed)
 
 
+# ---------------------------------------------------------------------------
+# BIP-32 HD nodes (phase 4b, native). The shim's cnx_hdnode_* transcribe
+# trezor's secp256k1 CKD; this pins them to the OFFICIAL BIP-32 test vectors by
+# reconstructing each node's xprv (Base58Check of the node blob + version) and
+# comparing to the published string - depth, parent fingerprint, child number,
+# chain code, and private key all at once.
+BIP32_VECTOR1_SEED = "000102030405060708090a0b0c0d0e0f"
+# (path, hardened-flags, official xprv). The path is applied step by step.
+BIP32_VECTOR1 = [
+    ([], "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi"),
+    ([(0, True)], "xprv9uHRZZhk6KAJC1avXpDAp4MDc3sQKNxDiPvvkX8Br5ngLNv1TxvUxt4cV1rGL5hj6KCesnDYUhd7oWgT11eZG7XnxHrnYeSvkzY7d2bhkJ7"),
+    ([(0, True), (1, False)], "xprv9wTYmMFdV23N2TdNG573QoEsfRrWKQgWeibmLntzniatZvR9BmLnvSxqu53Kw1UmYPxLgboyZQaXwTCg8MSY3H2EU4pWcQDnRnrVA1xe8fs"),
+    ([(0, True), (1, False), (2, True)], "xprv9z4pot5VBttmtdRTWfWQmoH1taj2axGVzFqSb8C9xaxKymcFzXBDptWmT7FwuEzG3ryjH4ktypQSAewRiNMjANTtpgP4mLTj34bhnZX7UiM"),
+    ([(0, True), (1, False), (2, True), (2, False)], "xprvA2JDeKCSNNZky6uBCviVfJSKyQ1mDYahRjijr5idH2WwLsEd4Hsb2Tyh8RfQMuPh7f7RtyzTtdrbdqqsunu5Mm3wDvUAKRHSC34sJ7in334"),
+    ([(0, True), (1, False), (2, True), (2, False), (1000000000, False)], "xprvA41z7zogVVwxVSgdKUHDy1SKmdb533PjDz7J6N6mV6uS3ze1ai8FHa8kmHScGpWmj4WggLyQjgPie1rFSruoUihUZREPSL39UNdE3BBDu76"),
+]
+
+
+def _b58decode(s):
+    num = 0
+    for ch in s:
+        num = num * 58 + _B58.index(ch)
+    body = num.to_bytes((num.bit_length() + 7) // 8, "big")
+    pad = len(s) - len(s.lstrip("1"))
+    return b"\x00" * pad + body
+
+
+def run_hd_checks(lib, kat):
+    seed = bytes.fromhex(BIP32_VECTOR1_SEED)
+    for path, xprv in BIP32_VECTOR1:
+        node = ctypes.create_string_buffer(73)
+        rc = lib.cnx_hdnode_from_seed(seed, len(seed), node)
+        if rc != 0:
+            kat.check("BIP-32 from_seed", False, f"rc={rc}")
+            return
+        for index, hardened in path:
+            child = ctypes.create_string_buffer(73)
+            rc = lib.cnx_hdnode_derive(node.raw, index, 1 if hardened else 0, child)
+            if rc != 0:
+                kat.check(f"BIP-32 derive index {index}", False, f"rc={rc}")
+                return
+            node = child
+        # official xprv body = version(4)|depth(1)|fp(4)|child(4)|cc(32)|00|priv(32)|checksum(4)
+        body = _b58decode(xprv)[4:-4]   # depth..priv, 74 bytes
+        blob = node.raw                  # depth|fp|child|cc|priv, 73 bytes
+        label = "m" + "".join(f"/{i}{'H' if h else ''}" for i, h in path)
+        ok = (blob[0:41] == body[0:41] and body[41] == 0
+              and blob[41:73] == body[42:74])
+        kat.check(f"BIP-32 vector 1 {label}", ok)
+    # a public-key accessor round trip against the shim's own pubkey derivation
+    node = ctypes.create_string_buffer(73)
+    lib.cnx_hdnode_from_seed(seed, len(seed), node)
+    priv = ctypes.create_string_buffer(32)
+    pub = ctypes.create_string_buffer(33)
+    lib.cnx_hdnode_private_key(node.raw, priv)
+    lib.cnx_hdnode_public_key(node.raw, pub)
+    kat.check("hdnode pubkey == pubkey(hdnode privkey)",
+              pub.raw == pubkey(lib, priv.raw, True))
+
+
 def main(argv):
     check = "--check" in argv[1:]
     cc = find_cc()
@@ -682,6 +748,7 @@ def main(argv):
         run_external_crosschecks(lib, kat)
         run_address_vectors(lib, kat)
         run_bip39_checks(lib, kat)
+        run_hd_checks(lib, kat)
 
     if kat.problems:
         for p in kat.problems:

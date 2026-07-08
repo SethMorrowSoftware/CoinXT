@@ -29,6 +29,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h> /* memcpy for the HD node blob field moves */
 
 #include "ecdsa.h"     /* vendored trezor-crypto: sign/verify/recover/ECDH   */
 #include "bignum.h"    /* scalar range check for cnx_seckey_verify           */
@@ -55,7 +56,7 @@
 
 /* ---- ABI version + status codes (stable; never renumber a shipped code) ---- */
 
-#define CNX_ABI_VERSION 2 /* 2: phase-2 curve surface added (2026-07-08) */
+#define CNX_ABI_VERSION 3 /* 3: BIP-32 HD nodes + Schnorr/BIP-340 (2026-07-08) */
 
 #define CNX_OK 0
 #define CNX_ERR_NULL (-1)     /* a required buffer pointer was NULL */
@@ -83,6 +84,7 @@ size_t cnx_ecdsa_sig_len(void) { return 64; }
 size_t cnx_recoverable_sig_len(void) { return 65; }
 size_t cnx_digest_len(void) { return 32; }
 size_t cnx_ecdh_secret_len(void) { return 32; }
+size_t cnx_hdnode_len(void) { return 73; }
 
 /* ---- the trezor-crypto integrator RNG hook --------------------------------
  * The phase-0 assumption was that nothing calls this once signing is RFC 6979
@@ -375,5 +377,156 @@ int cnx_ecdh(const unsigned char *sk32, const unsigned char *pub,
   }
   for (i = 0; i < 32; i++) out32[i] = session[1 + i];
   memzero(session, sizeof(session));
+  return CNX_OK;
+}
+
+/* ---- HD (BIP-32) nodes, secp256k1 only --------------------------------------
+ * The node crosses the ABI as a fixed 73-byte opaque blob (SPEC.md 5.1):
+ *   [depth:1][parent_fingerprint:4][child_num:4 BE][chain_code:32][priv:32]
+ * These are exactly the fields BIP-32's xprv/xpub serialization needs; the
+ * script layer adds the version bytes and Base58Check framing.
+ *
+ * We deliberately do NOT vendor trezor's bip32.c: it is multi-curve and drags
+ * in the whole tree (aes, cardano, nem, nist256p1, the ed25519-donna subtree).
+ * cnx_hdnode_derive instead transcribes trezor's OWN secp256k1 child-key
+ * derivation (hdnode_private_ckd_bip32) over the same audited primitives we
+ * already vendor (hmac_sha512, bn_add/bn_mod, ecdsa_get_public_key33). Every
+ * result is pinned to the official BIP-32 test vectors headless
+ * (tools/coin-kat.py). This is a standard, public KEY-DERIVATION SCHEME
+ * composing audited ops - like hash160 or the address encoders - not a new
+ * curve op or hash. */
+
+#define CNX_HDNODE_LEN 73
+#define CNX_HD_DEPTH 0
+#define CNX_HD_FP 1
+#define CNX_HD_CHILD 5
+#define CNX_HD_CC 9
+#define CNX_HD_KEY 41
+
+/* cnx_hdnode_len() is defined with the other length functions above. */
+
+/* fingerprint = first 4 bytes of hash160(pubkey33) */
+static void cnx_hd_fingerprint(const unsigned char *pub33, unsigned char *out4) {
+  unsigned char sha[32], rip[20];
+  sha256_Raw(pub33, 33, sha);
+  ripemd160(sha, 32, rip);
+  out4[0] = rip[0];
+  out4[1] = rip[1];
+  out4[2] = rip[2];
+  out4[3] = rip[3];
+}
+
+static void cnx_put_be32(unsigned char *p, uint32_t v) {
+  p[0] = (unsigned char)((v >> 24) & 0xff);
+  p[1] = (unsigned char)((v >> 16) & 0xff);
+  p[2] = (unsigned char)((v >> 8) & 0xff);
+  p[3] = (unsigned char)(v & 0xff);
+}
+
+/* master node from a seed: I = HMAC-SHA512("Bitcoin seed", seed); IL is the
+ * master private key (must be in [1, n-1]; a seed producing an out-of-range IL
+ * is rejected, ~2^-128), IR the chain code. depth 0, fingerprint 0, child 0. */
+int cnx_hdnode_from_seed(const unsigned char *seed, size_t slen,
+                         unsigned char *out_node) {
+  unsigned char I[64];
+  bignum256 a;
+  int ok;
+  if (seed == NULL || out_node == NULL) return CNX_ERR_NULL;
+  if (slen == 0 || slen > UINT32_MAX) return CNX_ERR_BADLEN;
+  hmac_sha512((const uint8_t *)"Bitcoin seed", 12, seed, (uint32_t)slen, I);
+  bn_read_be(I, &a);
+  ok = !bn_is_zero(&a) && bn_is_less(&a, &secp256k1.order);
+  memzero(&a, sizeof(a));
+  if (!ok) {
+    memzero(I, sizeof(I));
+    return CNX_ERR_BADKEY;
+  }
+  memzero(out_node, CNX_HDNODE_LEN);
+  out_node[CNX_HD_DEPTH] = 0;
+  /* fingerprint (4) and child (4) already zero from memzero */
+  memcpy(out_node + CNX_HD_CC, I + 32, 32);
+  memcpy(out_node + CNX_HD_KEY, I, 32);
+  memzero(I, sizeof(I));
+  return CNX_OK;
+}
+
+/* one BIP-32 step. index is 0..2^31-1; hardened != 0 sets the high bit. The
+ * out node's parent_fingerprint is hash160(parent pubkey)[:4], so the child
+ * blob is fully serializable to xprv/xpub in script. Returns CNX_ERR_BADKEY on
+ * the ~2^-127 case where IL >= n or the child key is zero (BIP-32 says use the
+ * next index); the caller retries with index+1. */
+int cnx_hdnode_derive(const unsigned char *node, int index, int hardened,
+                      unsigned char *out_node) {
+  unsigned char data[1 + 32 + 4];
+  unsigned char I[64];
+  unsigned char parent_pub[33];
+  bignum256 a, b;
+  uint32_t i;
+  if (node == NULL || out_node == NULL) return CNX_ERR_NULL;
+  if (index < 0) return CNX_ERR_RANGE;
+  i = (uint32_t)index;
+  if (hardened) i |= 0x80000000u;
+
+  /* the parent pubkey is needed for a non-hardened step's data AND for the
+   * child's parent fingerprint, so derive it up front */
+  if (ecdsa_get_public_key33(&secp256k1, node + CNX_HD_KEY, parent_pub) != 0)
+    return CNX_ERR_BADKEY;
+
+  if (i & 0x80000000u) {
+    data[0] = 0;
+    memcpy(data + 1, node + CNX_HD_KEY, 32); /* 0x00 || parent priv */
+  } else {
+    memcpy(data, parent_pub, 33);
+  }
+  cnx_put_be32(data + 33, i);
+
+  bn_read_be(node + CNX_HD_KEY, &a);
+  hmac_sha512(node + CNX_HD_CC, 32, data, sizeof(data), I);
+
+  bn_read_be(I, &b);
+  if (!bn_is_less(&b, &secp256k1.order)) {
+    memzero(&a, sizeof(a));
+    memzero(&b, sizeof(b));
+    memzero(I, sizeof(I));
+    return CNX_ERR_BADKEY;
+  }
+  bn_add(&b, &a);              /* b = IL + kpar */
+  bn_mod(&b, &secp256k1.order); /* mod n */
+  if (bn_is_zero(&b)) {
+    memzero(&a, sizeof(a));
+    memzero(&b, sizeof(b));
+    memzero(I, sizeof(I));
+    return CNX_ERR_BADKEY;
+  }
+
+  out_node[CNX_HD_DEPTH] = (unsigned char)(node[CNX_HD_DEPTH] + 1);
+  cnx_hd_fingerprint(parent_pub, out_node + CNX_HD_FP);
+  cnx_put_be32(out_node + CNX_HD_CHILD, i);
+  memcpy(out_node + CNX_HD_CC, I + 32, 32);
+  bn_write_be(&b, out_node + CNX_HD_KEY);
+
+  memzero(&a, sizeof(a));
+  memzero(&b, sizeof(b));
+  memzero(I, sizeof(I));
+  memzero(data, sizeof(data));
+  return CNX_OK;
+}
+
+int cnx_hdnode_private_key(const unsigned char *node, unsigned char *out32) {
+  if (node == NULL || out32 == NULL) return CNX_ERR_NULL;
+  memcpy(out32, node + CNX_HD_KEY, 32);
+  return CNX_OK;
+}
+
+int cnx_hdnode_public_key(const unsigned char *node, unsigned char *out33) {
+  if (node == NULL || out33 == NULL) return CNX_ERR_NULL;
+  if (ecdsa_get_public_key33(&secp256k1, node + CNX_HD_KEY, out33) != 0)
+    return CNX_ERR_BADKEY;
+  return CNX_OK;
+}
+
+int cnx_hdnode_chaincode(const unsigned char *node, unsigned char *out32) {
+  if (node == NULL || out32 == NULL) return CNX_ERR_NULL;
+  memcpy(out32, node + CNX_HD_CC, 32);
   return CNX_OK;
 }
