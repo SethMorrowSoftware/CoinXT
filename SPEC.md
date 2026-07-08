@@ -224,6 +224,13 @@ Addresses (compose the above):
   cxEthAddress(pPubkey)                   -> "0x" + EIP-55( keccak256(pub65[2..65])[13..32] )
   cxEthAddressChecksum(pAddress)          -> EIP-55 mixed-case form; verify on input
   cxEthPersonalHash(pMessage)             -> keccak256 of the EIP-191 prefixed message [personal_sign]
+
+Bitcoin transactions (the BIP-143 P2WPKH layer; the CALLER shows the fields + fee to a human first):
+  cxSigToDer(pSig64)                      -> strict-DER (BIP-66) form of a raw r||s signature
+  cxAddressToScript(pAddress)             -> scriptPubKey for any decodable address (fail closed)
+  cxBtcTxSignP2WPKH(pSeckey, pTxid, pVout, pAmountSats, pOutputs, pNested, pVersion, pSequence,
+                    pLocktime)            -> txid & LF & sighash & LF & raw signed tx (one SegWit
+                                             input, native or BIP-49 nested; SIGHASH_ALL)
 ```
 
 ## 7. Formats CoinXT must get byte-exact (the spec inside the spec)

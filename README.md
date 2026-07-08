@@ -78,12 +78,15 @@ CoinXT/
     check-docs-style.py     the house-style gate for .md (carried verbatim)
   examples/
     coinxt-demo.livecodescript    the self-building showcase stack: a branded, tabbed UI
-                                  (keys + WIF, five address forms with a testnet toggle,
-                                  ECDSA and Schnorr sign/verify/tamper, EIP-191 personal_sign +
-                                  ecrecover, a COMPLETE offline EIP-155 transaction, ECDH, the
-                                  Keccak-vs-SHA3 footgun + HMAC, wallet RESTORE from any BIP-39
-                                  phrase with a ten-address fidelity listing per chain, a
-                                  decode-anything inspector, self-test)
+                                  (keys + WIF import/export, five address forms with a testnet
+                                  toggle, ECDSA and Schnorr sign/verify/tamper plus verify-a-
+                                  pasted-signature, EIP-191 personal_sign + ecrecover, COMPLETE
+                                  offline transactions on both chains - EIP-155 Ethereum and
+                                  BIP-143 SegWit Bitcoin, each reproducing its official example
+                                  byte for byte - ECDH with pasted peer keys, the Keccak-vs-SHA3
+                                  footgun + HMAC, wallet RESTORE from any BIP-39 phrase with a
+                                  ten-address fidelity listing and a derivation-path explorer,
+                                  a decode-anything inspector, self-test)
     coinxt-tests.livecodescript   the on-engine self-test harness: put cxSelfTest()
 ```
 
@@ -129,12 +132,13 @@ real engine (see [CLAUDE.md](CLAUDE.md)); the ABI-3 additions need their own pas
 packaging follow the family model: a CMake build, a 5-platform CI matrix, and per-platform binaries
 committed under `src/code/` on main. Addresses, key serialization, and BIP-39 mnemonics are pure
 script: hex, Base58Check, Bech32/Bech32m (encode AND decode), WIF, EIP-55, EIP-191 personal-message
-hashing, RLP (composable encoders that build a complete EIP-155 transaction), the BTC (P2PKH,
-P2SH-P2WPKH, P2WPKH, P2TR) + ETH address builders, xprv/xpub framing, and the BIP-39 mnemonic
-surface over the embedded 2048-word list - all transcription-verified against Python and
+hashing, RLP (composable encoders that build a complete EIP-155 transaction), strict-DER signature
+framing, address-to-scriptPubKey, a single-input BIP-143 P2WPKH/nested transaction signer, the BTC
+(P2PKH, P2SH-P2WPKH, P2WPKH, P2TR) + ETH address builders, xprv/xpub framing, and the BIP-39
+mnemonic surface over the embedded 2048-word list - all transcription-verified against Python and
 vector-locked in CI (BIP-173/350, BIP-49/84/86, EIP-55, Trezor BIP-39, BIP-32, the published WIF
-vectors, the yellow-paper RLP vectors, the official EIP-155 example transaction byte for byte, and
-the canonical-mnemonic wallet-restore path).
+vectors, the yellow-paper RLP vectors, the official EIP-155 AND BIP-143 example transactions byte
+for byte, and the canonical-mnemonic wallet-restore path).
 
 [SPEC.md](SPEC.md), [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md), and [CLAUDE.md](CLAUDE.md) are the
 design and the running as-built log. Every deterministic path is pinned to a public known-answer vector,
