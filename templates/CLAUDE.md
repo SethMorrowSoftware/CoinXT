@@ -373,3 +373,22 @@ Seed entries (confirmed on-engine in the family; keep them, add to them):
   FIX:     `constant kSk1 = "..."` in .livecodescript; `constant kAbiVersion is 2` in .lcb.
   GATE:    check-livecodescript.py flags the wrong constant form per file type
            (check_constant_form).
+- SYMPTOM: error strings thrown by LCB handlers and caught by a livecodescript try/catch failed
+           `begins with` prefix tests: the CoinXT harness's five negative-path checks reported FAIL
+           while every positive path passed (on-engine, 2026-07-08).
+  CAUSE:   an error raised inside an LCB extension handler reaches the script catch variable as the
+           engine's STRUCTURED execution-error list (comma-separated code,line,column,hint lines)
+           with the thrown text embedded as a hint field. Only a SCRIPT-level throw arrives verbatim.
+  FIX:     normalize at the catch site: pass a verbatim prefixed message through, otherwise extract
+           from the first occurrence of your prefix to the end of that line (CoinXT's cxMakeError),
+           so the "error values begin with <Lib>:" contract holds for both throw origins.
+  GATE:    not statically detectable (runtime marshalling); recorded here.
+- SYMPTOM: calling a function that lives in a NOT-YET-LOADED sibling script library raises
+           "Function: error in function handler" with the function name as the hint (on-engine,
+           2026-07-08; it read like an ABI failure because the hint was cxCheckABI).
+  CAUSE:   the function message went unhandled: the library holding it was not in scope (start
+           using), so the engine reports an error at the call, not a "missing library" message.
+  FIX:     probe cross-file dependencies inside try/catch and report which layer is missing (the
+           CoinXT examples' preflight); never call a sibling library's functions bare in an
+           entry-point handler.
+  GATE:    not statically detectable across files; recorded here.
