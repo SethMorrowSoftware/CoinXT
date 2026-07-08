@@ -62,7 +62,8 @@ CoinXT/
     vendor/                 the vendored trezor-crypto subset (MIT) + VENDOR.md + LICENSE
   src/
     coinxt.lcb              the foreign-handler module (binds to cnx_*; needs an on-engine pass)
-    coinxt.livecodescript   the public cx* API (script-side encodings land in phase 3)
+    coinxt.livecodescript   the public cx* API + the phase-3 script encodings (hex, Base58Check,
+                            Bech32, EIP-55) and BTC/ETH address builders
     code/                   committed per-platform native libraries (coinxt.so/.dll/.dylib), laid
                             down by CI on main + pinned in src/code/MANIFEST.sha256
   tests/
@@ -74,8 +75,8 @@ CoinXT/
     check-docs-style.py     the house-style gate for .md (carried verbatim)
   examples/
     coinxt-demo.livecodescript    the self-building showcase stack: a branded, tabbed UI
-                                  (keys, sign/verify/tamper, ecrecover, ECDH, the Keccak-vs-SHA3
-                                  footgun, HMAC/PBKDF2 BIP-39 seed, and a one-click self-test)
+                                  (keys, BTC + ETH addresses, sign/verify/tamper, ecrecover, ECDH,
+                                  the Keccak-vs-SHA3 footgun, HMAC/PBKDF2 BIP-39 seed, self-test)
     coinxt-tests.livecodescript   the on-engine self-test harness: put cxSelfTest()
 ```
 

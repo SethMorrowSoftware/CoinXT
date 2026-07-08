@@ -423,6 +423,153 @@ def run_external_crosschecks(lib, kat):
               rc == 0 and out.raw == int(shared.x()).to_bytes(32, "big"))
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 address vectors (script-side encoders). coin-kat.py drives the NATIVE
+# shim, so it cannot run the .livecodescript Base58Check / Bech32 / EIP-55
+# encoders directly - those are checked ON-ENGINE by
+# examples/coinxt-tests.livecodescript. What this file CAN do, and does below,
+# is LOCK the expected address strings: it derives the pubkey from the real
+# shim, reference-encodes it in Python, and asserts the result equals the
+# famous PUBLIC vectors (BIP-173's bc1qw508..., the pk=1 Ethereum address). If
+# those pinned strings are ever mistyped in the on-engine harness, this fails.
+# The reference encoders are the same algorithm the livecodescript implements.
+
+# pubkey(1) = the secp256k1 generator; its canonical addresses are published.
+ADDRESS_VECTORS = {
+    # seckey int: (P2PKH mainnet, P2WPKH mainnet, ETH EIP-55)
+    1: ("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+        "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"),
+    0xC0FFEE: ("1PkjVT2eq7sLQaad4sa3bsawdHdop5EPWj",
+               "bc1qlxvp7agw998t68qm76ek6t20gh320yrs8lhw7j",
+               "0xF5A5E415061470A8b9137959180901aEa72450a4"),
+}
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_BECH32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+_BECH32_GEN = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
+
+
+def _h160(b):
+    return hashlib.new("ripemd160", hashlib.sha256(b).digest()).digest()
+
+
+def _dsha(b):
+    return hashlib.sha256(hashlib.sha256(b).digest()).digest()
+
+
+def _b58check(version, payload):
+    body = bytes([version]) + payload + _dsha(bytes([version]) + payload)[:4]
+    n_zero = len(body) - len(body.lstrip(b"\x00"))
+    num = int.from_bytes(body, "big")
+    out = ""
+    while num:
+        num, rem = divmod(num, 58)
+        out = _B58[rem] + out
+    return "1" * n_zero + out
+
+
+def _bech32_polymod(values):
+    chk = 1
+    for v in values:
+        top = chk >> 25
+        chk = ((chk & 0x1FFFFFF) << 5) ^ v
+        for i in range(5):
+            chk ^= _BECH32_GEN[i] if ((top >> i) & 1) else 0
+    return chk
+
+
+def _bech32_p2wpkh(hrp, h20):
+    data = [0]
+    acc = bits = 0
+    for b in h20:
+        acc = (acc << 8) | b
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            data.append((acc >> bits) & 31)
+    if bits:
+        data.append((acc << (5 - bits)) & 31)
+    expand = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+    polymod = _bech32_polymod(expand + data + [0] * 6) ^ 1
+    checksum = [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
+    return hrp + "1" + "".join(_BECH32[d] for d in data + checksum)
+
+
+def _keccak256(msg):
+    rc = [0x0000000000000001, 0x0000000000008082, 0x800000000000808A,
+          0x8000000080008000, 0x000000000000808B, 0x0000000080000001,
+          0x8000000080008081, 0x8000000000008009, 0x000000000000008A,
+          0x0000000000000088, 0x0000000080008009, 0x000000008000000A,
+          0x000000008000808B, 0x800000000000008B, 0x8000000000008089,
+          0x8000000000008003, 0x8000000000008002, 0x8000000000000080,
+          0x000000000000800A, 0x800000008000000A, 0x8000000080008081,
+          0x8000000000008080, 0x0000000080000001, 0x8000000080008008]
+    rot = [[0, 36, 3, 41, 18], [1, 44, 10, 45, 2], [62, 6, 43, 15, 61],
+           [28, 55, 25, 21, 56], [27, 20, 39, 8, 14]]
+    mask = (1 << 64) - 1
+
+    def rol(x, n):
+        return ((x << n) | (x >> (64 - n))) & mask
+
+    a = [[0] * 5 for _ in range(5)]
+    rate = 136
+    m = bytearray(msg)
+    m.append(0x01)
+    while len(m) % rate:
+        m.append(0)
+    m[-1] ^= 0x80
+    for off in range(0, len(m), rate):
+        for i in range(rate // 8):
+            a[i % 5][i // 5] ^= int.from_bytes(m[off + i * 8:off + i * 8 + 8], "little")
+        for rnd in range(24):
+            c = [a[x][0] ^ a[x][1] ^ a[x][2] ^ a[x][3] ^ a[x][4] for x in range(5)]
+            d = [c[(x - 1) % 5] ^ rol(c[(x + 1) % 5], 1) for x in range(5)]
+            for x in range(5):
+                for y in range(5):
+                    a[x][y] ^= d[x]
+            b = [[0] * 5 for _ in range(5)]
+            for x in range(5):
+                for y in range(5):
+                    b[y][(2 * x + 3 * y) % 5] = rol(a[x][y], rot[x][y])
+            for x in range(5):
+                for y in range(5):
+                    a[x][y] = b[x][y] ^ ((~b[(x + 1) % 5][y]) & b[(x + 2) % 5][y])
+            a[0][0] ^= rc[rnd]
+    out = bytearray()
+    for i in range(4):
+        out += a[i % 5][i // 5].to_bytes(8, "little")
+    return bytes(out[:32])
+
+
+def _eth_address(pub65):
+    body = _keccak256(pub65[1:])[12:].hex()
+    kh = _keccak256(body.encode("ascii")).hex()
+    out = "0x"
+    for i, ch in enumerate(body):
+        if ch in "0123456789":
+            out += ch
+        else:
+            out += ch.upper() if int(kh[i], 16) >= 8 else ch
+    return out
+
+
+def run_address_vectors(lib, kat):
+    # keccak256("") sanity: proves the reference keccak here matches the shim's
+    kat.check("reference keccak256(empty) matches the shim",
+              _keccak256(b"").hex() == digest(lib, "cnx_keccak256", b"").hex())
+    for sk_int, (exp_p2pkh, exp_p2wpkh, exp_eth) in ADDRESS_VECTORS.items():
+        sk = sk_bytes(sk_int)
+        pub33 = pubkey(lib, sk, True)   # from the real shim
+        pub65 = pubkey(lib, sk, False)
+        h20 = _h160(pub33)
+        kat.check(f"P2PKH vector locked (sk={sk_int:#x})",
+                  _b58check(0x00, h20) == exp_p2pkh)
+        kat.check(f"P2WPKH vector locked (sk={sk_int:#x})",
+                  _bech32_p2wpkh("bc", h20) == exp_p2wpkh)
+        kat.check(f"ETH/EIP-55 vector locked (sk={sk_int:#x})",
+                  _eth_address(pub65) == exp_eth)
+
+
 def main(argv):
     check = "--check" in argv[1:]
     cc = find_cc()
@@ -447,6 +594,7 @@ def main(argv):
         run_mac_kdf_kats(lib, kat)
         run_curve_kats(lib, kat)
         run_external_crosschecks(lib, kat)
+        run_address_vectors(lib, kat)
 
     if kat.problems:
         for p in kat.problems:

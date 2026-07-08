@@ -9,10 +9,14 @@ native seam and the KAT harness come first, because everything downstream trusts
 > [CLAUDE.md](CLAUDE.md)). The shim (ABI 2) exports the full hash/KDF surface and the secp256k1 curve
 > surface; the KAT harness pins the classic RFC 6979 vectors and cross-checks signatures, pubkeys, and
 > ECDH against python-ecdsa in both directions (the "verifies in an independent library" bar, met
-> headless). Schnorr / BIP-340 is deferred to a Taproot phase (upstream provides it only via
-> secp256k1-zkp). Unlike OnionXT (pure script), CoinXT HAS a C shim, so the FFI/C-ABI section of
-> CLAUDE.md is law, and every shim change builds under ASan + UBSan and bumps the ABI + `cxCheckABI()`
-> on any ABI change. Next: phase 3 (encodings/addresses in script) and the on-engine pass.
+> headless). The full stack ran 41/41 on a real engine (see CLAUDE.md as-built). **Phase 3 (encodings
+> and addresses) is now IN**, pure script: hex, Base58Check, Bech32/Bech32m, EIP-55, and BTC (P2PKH,
+> P2WPKH) + ETH address builders, transcription-verified against Python and vector-locked in CI to the
+> public BIP-173 / EIP-55 vectors (needs an on-engine pass). Schnorr / BIP-340 is deferred to a Taproot
+> phase (upstream provides it only via secp256k1-zkp). Unlike OnionXT (pure script), CoinXT HAS a C
+> shim, so the FFI/C-ABI section of CLAUDE.md is law, and every shim change builds under ASan + UBSan
+> and bumps the ABI + `cxCheckABI()` on any ABI change. Next: BIP-39 mnemonics (script + wordlist),
+> then BIP-32 HD derivation (needs native: vendored `bip32.c` + an ABI bump).
 
 ## The "done" bar (applies to every phase)
 

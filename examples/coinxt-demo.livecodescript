@@ -64,7 +64,7 @@ constant kClrPillBad = "247,216,216"     -- ABI pill: not loaded
 constant kClrPillBadText = "150,42,42"
 
 -- ------------------------------------------------------------------ state
-local sTab            -- active tab key: keys | sign | eth | ecdh | hash | kdf | about
+local sTab            -- active tab key: keys | addr | sign | eth | ecdh | hash | kdf | about
 local sSeckey         -- the demo seckey (PUBLIC test key material only)
 local sPub33          -- its compressed pubkey
 local sPub65          -- its uncompressed pubkey
@@ -72,6 +72,8 @@ local sSig            -- last plain signature (64 bytes)
 local sSigMsg         -- the message that was signed
 local sEthSig         -- last recoverable signature (65 bytes)
 local sEthMsg         -- the message signed on the Ethereum tab
+local sAddrP2WPKH     -- last derived SegWit address (for the copy button)
+local sAddrEth        -- last derived Ethereum address (for the copy button)
 local sTPass          -- embedded self-test: passing checks
 local sTFail          -- embedded self-test: failing checks
 local sTLog           -- embedded self-test: running transcript
@@ -366,20 +368,23 @@ on buildUI
    set the textAlign of field "ui:pillText" to "center"
    refreshAbiPill
 
-   -- tab bar
-   cxdButton "ui:tabKeys", "24,84,141,114", "Keys", "idle"
-   cxdButton "ui:tabSign", "146,84,263,114", "Sign & Verify", "idle"
-   cxdButton "ui:tabEth", "268,84,385,114", "Ethereum", "idle"
-   cxdButton "ui:tabEcdh", "390,84,507,114", "Shared Secret", "idle"
-   cxdButton "ui:tabHash", "512,84,629,114", "Hashes", "idle"
-   cxdButton "ui:tabKdf", "634,84,751,114", "Key Derivation", "idle"
-   cxdButton "ui:tabAbout", "756,84,873,114", "About", "idle"
+   -- tab bar (eight tabs; short labels so the row fits the 900px window,
+   -- while each panel header spells the capability out in full)
+   cxdButton "ui:tabKeys", "24,84,127,114", "Keys", "idle"
+   cxdButton "ui:tabAddr", "131,84,234,114", "Addresses", "idle"
+   cxdButton "ui:tabSign", "238,84,341,114", "Sign", "idle"
+   cxdButton "ui:tabEth", "345,84,448,114", "Ethereum", "idle"
+   cxdButton "ui:tabEcdh", "452,84,555,114", "ECDH", "idle"
+   cxdButton "ui:tabHash", "559,84,662,114", "Hashes", "idle"
+   cxdButton "ui:tabKdf", "666,84,769,114", "Derive", "idle"
+   cxdButton "ui:tabAbout", "773,84,876,114", "About", "idle"
 
    -- content panel + footer
    cxdPanel "ui:panel", "24,124,876,652"
    cxdLabel "ui:footer", "24,662,876,694", "Backed by trezor-crypto through the CoinXT C shim. Signing is deterministic (RFC 6979, always low-s); every malformed input fails closed. Demo keys are PUBLIC - never fund them.", kClrInkMute, 11, "plain"
 
    buildKeysTab
+   buildAddrTab
    buildSignTab
    buildEthTab
    buildEcdhTab
@@ -426,9 +431,22 @@ on buildKeysTab
    cxdButton "keys:copy", "480,222,600,252", "Copy pubkey", "idle"
    cxdCap "keys:outLabel", "48,266,852,286", "seckey (PUBLIC) / compressed pubkey (02|03) / uncompressed pubkey (04):", kClrInkMute
    cxdMono "keys:out", "48,288,852,452"
-   cxdCap "keys:note", "48,462,852,502", "The compressed pubkey feeds a Bitcoin address; the uncompressed one (minus its 04 byte) feeds an Ethereum address. Those encoders arrive in the next phase.", kClrInkMute
+   cxdCap "keys:note", "48,462,852,502", "The compressed pubkey feeds a Bitcoin address; the uncompressed one (minus its 04 byte) feeds an Ethereum address. Open the Addresses tab to see all three.", kClrInkMute
    cxdLabel "keys:status", "48,566,852,600", "No key yet - click a button above.", kClrInkSoft, 12, "plain"
 end buildKeysTab
+
+-- ---- Addresses tab
+on buildAddrTab
+   cxdHdr "addr:h", "48,138,852,166", "Real Bitcoin and Ethereum addresses from your key"
+   cxdCap "addr:p", "48,168,852,214", "The one public key becomes three addresses: a Bitcoin legacy address (Base58Check), a Bitcoin SegWit address (Bech32, bc1...), and an Ethereum address (Keccak-256 with the EIP-55 mixed-case checksum). All computed in script, pinned to the BIP-173 and EIP-55 test vectors.", kClrInkSoft
+   cxdButton "addr:go", "48,222,236,252", "Derive addresses", "primary"
+   cxdButton "addr:copyBtc", "248,222,428,252", "Copy SegWit (bc1)", "idle"
+   cxdButton "addr:copyEth", "440,222,600,252", "Copy Ethereum", "eth"
+   cxdCap "addr:outLabel", "48,266,852,286", "P2PKH (legacy 1...) / P2WPKH (SegWit bc1...) / Ethereum (0x...):", kClrInkMute
+   cxdMono "addr:out", "48,288,852,452"
+   cxdCap "addr:note", "48,462,852,502", "The legacy and SegWit forms come from the COMPRESSED key; the Ethereum form comes from the UNCOMPRESSED key (its last 20 keccak bytes). One key, three chains-worth of addresses.", kClrInkMute
+   cxdLabel "addr:status", "48,566,852,600", "Make a key on the Keys tab, then derive its addresses here.", kClrInkSoft, 12, "plain"
+end buildAddrTab
 
 -- ---- Sign & Verify tab
 on buildSignTab
@@ -520,6 +538,7 @@ end showTab
 
 on restyleTabs
    styleTab "ui:tabKeys", (sTab is "keys")
+   styleTab "ui:tabAddr", (sTab is "addr")
    styleTab "ui:tabSign", (sTab is "sign")
    styleTab "ui:tabEth", (sTab is "eth")
    styleTab "ui:tabEcdh", (sTab is "ecdh")
@@ -552,6 +571,8 @@ on mouseUp
       handleChrome tRole
    else if tPrefix is "keys" then
       handleKeys tRole
+   else if tPrefix is "addr" then
+      handleAddr tRole
    else if tPrefix is "sign" then
       handleSign tRole
    else if tPrefix is "eth" then
@@ -570,6 +591,8 @@ end mouseUp
 on handleChrome pRole
    if pRole is "tabKeys" then
       showTab "keys"
+   else if pRole is "tabAddr" then
+      showTab "addr"
    else if pRole is "tabSign" then
       showTab "sign"
    else if pRole is "tabEth" then
@@ -645,6 +668,52 @@ on doCopyPubkey
    cxdCopyFlash "keys:copy", cxdHex(sPub33)
    cxdStatus "keys:status", "Compressed public key copied to the clipboard.", "ok"
 end doCopyPubkey
+
+-- ------------------------------------------------------------------ Addresses tab actions
+on handleAddr pRole
+   if pRole is "go" then
+      doAddresses
+   else if pRole is "copyBtc" then
+      if sAddrP2WPKH is empty then
+         cxdStatus "addr:status", "Derive addresses first.", "bad"
+      else
+         cxdCopyFlash "addr:copyBtc", sAddrP2WPKH
+         cxdStatus "addr:status", "SegWit address copied to the clipboard.", "ok"
+      end if
+   else if pRole is "copyEth" then
+      if sAddrEth is empty then
+         cxdStatus "addr:status", "Derive addresses first.", "bad"
+      else
+         cxdCopyFlash "addr:copyEth", sAddrEth
+         cxdStatus "addr:status", "Ethereum address copied to the clipboard.", "ok"
+      end if
+   end if
+end handleAddr
+
+on doAddresses
+   local tP2pkh
+   local tP2wpkh
+   local tEth
+   local tOut
+   if haveKey("addr:status") is false then
+      exit doAddresses
+   end if
+   -- legacy and SegWit come from the compressed key; Ethereum from uncompressed
+   put cxBtcAddressP2PKH(sPub33, true) into tP2pkh
+   put cxBtcAddressP2WPKH(sPub33, true) into tP2wpkh
+   put cxEthAddress(sPub65) into tEth
+   if cxIsError(tP2pkh) or cxIsError(tP2wpkh) or cxIsError(tEth) then
+      cxdStatus "addr:status", "Address derivation failed; is the extension loaded?", "bad"
+      exit doAddresses
+   end if
+   put tP2wpkh into sAddrP2WPKH
+   put tEth into sAddrEth
+   put "BTC legacy   (P2PKH)   " & tP2pkh & return into tOut
+   put "BTC SegWit   (P2WPKH)  " & tP2wpkh & return after tOut
+   put "Ethereum     (EIP-55)  " & tEth after tOut
+   put tOut into field "addr:out"
+   cxdStatus "addr:status", "Three addresses from one key - fund none of them (demo keys are public).", "ok"
+end doAddresses
 
 -- ------------------------------------------------------------------ Sign tab actions
 on handleSign pRole
