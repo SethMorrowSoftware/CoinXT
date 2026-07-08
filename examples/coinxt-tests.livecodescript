@@ -116,6 +116,12 @@ constant kPsbt143In = "cHNidP8BAHcBAAAAAdtrGyCqD9eyOIC+LsvUqYEwl0z0dI+2YJKsTTzrG
 constant kPsbt143Signed = "cHNidP8BAHcBAAAAAdtrGyCqD9eyOIC+LsvUqYEwl0z0dI+2YJKsTTzrGlR3AQAAAAD+////Ari06wsAAAAAGXapFKRXtoTX8NU5pGpFu8BD81tZ0NljiKwACK8vAAAAABl2qRT9Jwse5qvK6pf+p60EAui9itbXfIiskgQAAAABASAAypo7AAAAABepFEcz83z024b7wu/tJQC09OSfMSAjhyICA60djokhLwuSx00ju3EMAGYq0UcBmKxIxD99b5OiomhzRzBEAiBHrI6Hg1LT673hyUzjoQ0FfCQXV0cRb4KI5deU0S1ILwIgIX82pIXK6QPHEzMdh3wfZGd+NiKtQBByaHBUBlb+ncsBAQMEAQAAAAEEFgAUeQkZchhsRJ6x3tIreOQNAJvfAIkAAAA="
 constant kPsbtHd = "cHNidP8BAFICAAAAAaqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqAAAAAAD9////AZBfAQAAAAAAFgAUdR526BmRltRUlBxF0bOjI/FDO9YAAAAAAAEBH6CGAQAAAAAAFgAUwM681sPTyox13F7GLr5VMw75EOIiBgMw1U/Q3UIKbl+NNiT180gsrjUPedXwdTv1vu+cLZGvPBhzxdoKVAAAgAAAAIAAAACAAAAAAAAAAAAAAA=="
 constant kPsbtHdTxid = "28257a9a303b3eb63c4366754ac0905a9b73548e6a3158c86e408bdf018cff85"
+-- EIP-712: the OFFICIAL example in the EIP (Mail struct, domain Ether Mail,
+-- key keccak256("cow")): published digest, r, s, v=28, signer address
+constant kEipDigest = "be609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2"
+constant kEipR = "4355c47d63924e8a72e509b65029052eb6c299d53a04e167c5775fd466751c9d"
+constant kEipS = "07299936d304c153f6443dfa05f40ff007d72911b6f72307f996231605b91562"
+constant kEipSigner = "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826"
 constant kPsbtHdRaw = "02000000000101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000fdffffff01905f010000000000160014751e76e8199196d454941c45d1b3a323f1433bd602483045022100cae928967fc76aa2e058328d58d824f58472fe659066dc6aa9c5ba2449b4359c02201f202c8eb5dfe810a28e465c68d260ec6c263be7acb42e528fb4bda055a7dc1001210330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c00000000"
 
 function cxSelfTest
@@ -171,6 +177,7 @@ function cxSelfTest
    testEthTx
    testBtcTx
    testPsbt
+   testEip712
    testMnemonics
    testHd
    testSchnorr
@@ -594,6 +601,43 @@ on testPsbt
       "HD signing walked m/84h/0h/0h/0/0 and extracted the pinned tx"
    cxtCheck cxIsError(cxPsbtDecode("cHNidP8Xnope")), "a corrupt PSBT is rejected"
 end testPsbt
+
+-- EIP-712 typed data: build the EIP's own Mail example through the
+-- composable word/hashStruct/digest chain and sign it recoverably
+on testEip712
+   local tDom
+   local tPerson
+   local tMail
+   local tCow
+   local tBob
+   local tMsg
+   local tDigest
+   local tSk
+   local tSig
+   cxtSection "EIP-712 typed structured data"
+   put "Person(string name,address wallet)" into tPerson
+   put "Mail(Person from,Person to,string contents)" & tPerson into tMail
+   put cxEip712HashStruct("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)", \
+      cxEip712WordHash(cxtAscii("Ether Mail")) & cxEip712WordHash(cxtAscii("1")) \
+      & cxEip712WordUInt("1") & cxEip712WordAddress("0xCcCcccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC")) into tDom
+   put cxEip712HashStruct(tPerson, cxEip712WordHash(cxtAscii("Cow")) \
+      & cxEip712WordAddress("0xCd2a3d9F938E13CD947Ec05AbC7fe734Df8DD826")) into tCow
+   put cxEip712HashStruct(tPerson, cxEip712WordHash(cxtAscii("Bob")) \
+      & cxEip712WordAddress("0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB")) into tBob
+   put cxEip712HashStruct(tMail, tCow & tBob & cxEip712WordHash(cxtAscii("Hello, Bob!"))) into tMsg
+   put cxEip712Digest(tDom, tMsg) into tDigest
+   cxtCheck (cxtHex(tDigest) is kEipDigest), "the digest matches the EIP's published example"
+   put cxKeccak256(cxtAscii("cow")) into tSk
+   put cxSignRecoverable(tSk, tDigest) into tSig
+   cxtCheck (cxtHex(byte 1 to 32 of tSig) is kEipR), "r matches the published signature"
+   cxtCheck (cxtHex(byte 33 to 64 of tSig) is kEipS), "s matches the published signature"
+   cxtCheck (byteToNum(byte 65 of tSig) + 27 is 28), "v is the published 28"
+   cxtCheck (cxEthAddress(cxRecover(tSig, tDigest)) is kEipSigner), \
+      "ecrecover yields the famous cow signer address"
+   cxtCheck cxIsError(cxEip712WordAddress("0xCd2a3d9f938e13Cd947ec05abc7FE734df8dd826")), \
+      "a wrong mixed-case address fails closed"
+   put empty into tSk
+end testEip712
 
 -- the demo's headline flow, end to end on-engine: the canonical mnemonic
 -- restores to the published first addresses of every standard path (the

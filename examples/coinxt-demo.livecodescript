@@ -520,6 +520,7 @@ on buildEthTab
    cxdInput "eth:to", "48,292,560,322", "0x3535353535353535353535353535353535353535"
    cxdInput "eth:value", "572,292,800,322", "1000000000000000000"
    cxdButton "eth:tx", "812,292,1012,322", "Sign transaction", "eth"
+   cxdButton "eth:typed", "1024,292,1152,322", "EIP-712", "idle"
    cxdCap "eth:outLabel", "48,330,1152,348", "digest / signature / recovered address / raw signed transaction:", kClrInkMute
    cxdMono "eth:out", "48,350,1152,540"
    cxdLabel "eth:status", "48,596,1152,628", "Make a key on the Keys tab first.", kClrInkSoft, 12, "plain"
@@ -617,7 +618,7 @@ end buildDecodeTab
 -- ---- About tab (pitch + embedded self-test)
 on buildAboutTab
    cxdHdr "about:h", "48,128,1152,156", "CoinXT: Bitcoin and Ethereum primitives for xTalk"
-   cxdCap "about:exp", "48,158,1152,290", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), act as a PSBT cold signer (decode, sign, finalize BIP-174 files from Sparrow / Electrum / Core, including HD signing via the PSBT's own derivation paths), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
+   cxdCap "about:exp", "48,158,1152,290", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), act as a PSBT cold signer (decode, sign, finalize BIP-174 files from Sparrow / Electrum / Core, including HD signing via the PSBT's own derivation paths), sign EIP-712 typed data (the chain behind every signTypedData prompt, pinned to the EIP's own example), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
    cxdButton "about:selftest", "48,298,300,328", "Run the full self-test", "primary"
    cxdMono "about:out", "48,338,1152,586"
    cxdLabel "about:status", "48,596,1152,628", "Click Run the full self-test to check every primitive against a public vector.", kClrInkSoft, 12, "plain"
@@ -1094,8 +1095,54 @@ on handleEth pRole
       doRecover
    else if pRole is "tx" then
       doTxSign
+   else if pRole is "typed" then
+      doEip712
    end if
 end handleEth
+
+-- sign the EIP's own Mail example as typed data (EIP-712) with the CURRENT
+-- key: domain separator, struct hashes, digest, recoverable signature - the
+-- exact chain behind every wallet's signTypedData prompt. The self-test
+-- pins the whole example against the EIP's published digest and signature.
+on doEip712
+   local tPerson
+   local tMail
+   local tDom
+   local tCow
+   local tBob
+   local tMsg
+   local tDigest
+   local tSig
+   local tOut
+   if haveKey("eth:status") is false then
+      exit doEip712
+   end if
+   put "Person(string name,address wallet)" into tPerson
+   put "Mail(Person from,Person to,string contents)" & tPerson into tMail
+   put cxEip712HashStruct("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)", \
+      cxEip712WordHash(cxdAscii("Ether Mail")) & cxEip712WordHash(cxdAscii("1")) \
+      & cxEip712WordUInt("1") & cxEip712WordAddress("0xCcCcccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC")) into tDom
+   put cxEip712HashStruct(tPerson, cxEip712WordHash(cxdAscii("Cow")) \
+      & cxEip712WordAddress("0xCd2a3d9F938E13CD947Ec05AbC7fe734Df8DD826")) into tCow
+   put cxEip712HashStruct(tPerson, cxEip712WordHash(cxdAscii("Bob")) \
+      & cxEip712WordAddress("0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB")) into tBob
+   put cxEip712HashStruct(tMail, tCow & tBob & cxEip712WordHash(cxdAscii("Hello, Bob!"))) into tMsg
+   put cxEip712Digest(tDom, tMsg) into tDigest
+   put cxSignRecoverable(sSeckey, tDigest) into tSig
+   if cxIsError(tDigest) or cxIsError(tSig) then
+      cxdStatus "eth:status", "Typed-data signing failed; is the extension loaded?", "bad"
+      exit doEip712
+   end if
+   put "typed      Mail(from Cow, to Bob, contents Hello, Bob!) under domain Ether Mail" & return into tOut
+   put "domainSep  " & cxdHex(tDom) & return after tOut
+   put "structHash " & cxdHex(tMsg) & return after tOut
+   put "digest     " & cxdHex(tDigest) && "(keccak of 0x19 0x01 || both)" & return after tOut
+   put "r||s       " & cxdHex(byte 1 to 64 of tSig) & return after tOut
+   put "v          " & (byteToNum(byte 65 of tSig) + 27) & return after tOut
+   put "signer     " & cxEthAddress(sPub65) after tOut
+   put tOut into field "eth:out"
+   cxdStatus "eth:status", "The EIP-712 chain behind every signTypedData prompt (Permits, orders, votes). The self-test pins this exact example to the EIP's published signature.", "ok"
+end doEip712
 
 on doEthSign
    local tHash
@@ -1925,7 +1972,19 @@ on doSelfTest
    if cxdProbe() is false then
       put "The CoinXT extension or its native library is not loaded." & return after sTLog
       put "Install the packaged extension and load src/coinxt.livecodescript, then retry." after sTLog
-      put sTLog into field "about:out"
+      -- EIP-712: the EIP's own example digest, byte for byte
+   put cxEip712Digest(cxEip712HashStruct("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)", \
+      cxEip712WordHash(cxdAscii("Ether Mail")) & cxEip712WordHash(cxdAscii("1")) & cxEip712WordUInt("1") \
+      & cxEip712WordAddress("0xCcCcccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC")), \
+      cxEip712HashStruct("Mail(Person from,Person to,string contents)Person(string name,address wallet)", \
+      cxEip712HashStruct("Person(string name,address wallet)", cxEip712WordHash(cxdAscii("Cow")) & cxEip712WordAddress("0xCd2a3d9F938E13CD947Ec05AbC7fe734Df8DD826")) \
+      & cxEip712HashStruct("Person(string name,address wallet)", cxEip712WordHash(cxdAscii("Bob")) & cxEip712WordAddress("0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB")) \
+      & cxEip712WordHash(cxdAscii("Hello, Bob!")))) into tDecoded
+   checkInto (cxHexEncode(tDecoded) is \
+      "be609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2"), \
+      "the EIP-712 Mail example digest matches the EIP's published value"
+
+   put sTLog into field "about:out"
       cxdStatus "about:status", "Cannot run: the cx* API is not reachable.", "bad"
       exit doSelfTest
    end if

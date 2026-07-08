@@ -673,3 +673,22 @@ signer. Pure script over the existing primitives (no native change, ABI 3, binar
 - Honest status: headless-verified and vector-locked everywhere Python can reach; NEEDS AN
   ON-ENGINE PASS (`testPsbt` is the checklist; watch the engine's base64 functions and the
   array-typed locals in the parser, the two most engine-sensitive pieces of this round).
+
+**Phase 6b - EIP-712 typed structured data (2026-07-08).** The Ethereum half of the modern-signing
+round; BIP-322 (its Bitcoin counterpart) is DEFERRED to the next round and recorded here so the
+scope stays honest. Pure script (no native change, ABI 3, binaries untouched).
+
+- New public API: `cxEip712TypeHash` / `cxEip712HashStruct` / `cxEip712WordUInt` /
+  `cxEip712WordAddress` (EIP-55-gated like the tx signer) / `cxEip712WordHash` /
+  `cxEip712Digest`. COMPOSABLE like RLP: encode each member as a 32-byte word, concatenate,
+  hashStruct with the canonical type string; a nested struct's hash IS its parent's word, so no
+  structure crosses an API. Sign the digest with cxSignRecoverable (v = recid + 27). This is the
+  chain behind every wallet signTypedData prompt (token Permits, exchange orders, DAO votes,
+  Sign-In with Ethereum).
+- Anchor: the OFFICIAL example in the EIP itself (the Mail struct under the Ether Mail domain,
+  signed by keccak256("cow")) reproduces BYTE FOR BYTE through the shim - digest, r, s, v = 28,
+  and the famous signer address 0xCD2a...D826 - verified before pinning, locked in coin-kat
+  (`run_eip712_checks`), on-engine (`testEip712`), and the demo self-test (digest pin).
+- Demo: an EIP-712 button on the Ethereum tab signs the Mail example with the CURRENT key and
+  shows the whole chain (domain separator, struct hash, digest, r||s, v, signer).
+- Honest status: NEEDS AN ON-ENGINE PASS (`testEip712` is the checklist).
