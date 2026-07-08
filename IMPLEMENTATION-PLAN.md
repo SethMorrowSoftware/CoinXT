@@ -15,8 +15,10 @@ native seam and the KAT harness come first, because everything downstream trusts
 > public BIP-173 / EIP-55 vectors (needs an on-engine pass). Schnorr / BIP-340 is deferred to a Taproot
 > phase (upstream provides it only via secp256k1-zkp). Unlike OnionXT (pure script), CoinXT HAS a C
 > shim, so the FFI/C-ABI section of CLAUDE.md is law, and every shim change builds under ASan + UBSan
-> and bumps the ABI + `cxCheckABI()` on any ABI change. Next: BIP-39 mnemonics (script + wordlist),
-> then BIP-32 HD derivation (needs native: vendored `bip32.c` + an ABI bump).
+> and bumps the ABI + `cxCheckABI()` on any ABI change. **BIP-39 mnemonics are now IN** too (pure
+> script over the embedded 2048-word list; entropy<->words, validate, and mnemonic->seed via the
+> existing PBKDF2), vector-locked to the Trezor BIP-39 vectors. Next: BIP-32 HD derivation, the one
+> remaining wallet piece that needs native work (vendored `bip32.c` + an ABI bump to 3).
 
 ## The "done" bar (applies to every phase)
 
