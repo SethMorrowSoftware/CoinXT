@@ -625,3 +625,20 @@ transaction offline, and let a user bring their own test material to every tab.
   0x-prefixed raw hex.
 - Honest status: headless-verified and vector-locked everywhere Python can reach; the new script
   paths NEED AN ON-ENGINE PASS (`testBtcTx` + the new demo flows are the checklist).
+
+**Demo layout pass - the 720p footprint (2026-07-08).** Pure geometry/presentation, demo file only
+(no library, harness, KAT, or native change). The stack moved from 900x700 to 1200x680 so it fits a
+1280x720 display with window chrome to spare, the family-demo posture (wide and shallow, not tall):
+
+- One shared grid across all eleven tabs: content column x 48..1152 inside the 24..1176 panel,
+  header at y 128, paragraph from 158, the primary action row at ~210-248, and ONE status-line
+  position (y 596-628) on every tab, so the eye never hunts for the verdict.
+- The tab bar is eleven equal 102px tabs on a 105px rhythm, flush with the panel edges, with FULL
+  labels (Addresses, Ethereum, Hashes) instead of the 900px abbreviations.
+- The 1104px mono column fits every value on one line: a 65-byte pubkey, a 64-byte signature, a
+  full sha512/hmac512 (cxdShort, the truncating preview helper, is gone - nothing needs shortening
+  now), xprv/xpub strings, and the BIP-143/EIP-155 raw txs wrap once instead of four times.
+- Primary buttons lead every action row (the BTC Tx tab's Sign moved from right to first, matching
+  the other tabs); copy/preset/toggle buttons follow.
+- Still NEEDS AN ON-ENGINE PASS like every demo change (pure layout, so the checklist is visual:
+  no clipped labels, the measured-height cxdLabel fitting still behaves at the new widths).
