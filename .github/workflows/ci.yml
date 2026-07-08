@@ -1,18 +1,35 @@
 name: CoinXT CI
 
-# The automated safety net CoinXT gets. OXT is a GUI runtime with no headless way
-# to compile or run .lcb / .livecodescript, so the script layer is covered by the
-# static gates only; behaviour on a real engine is confirmed manually (CLAUDE.md).
-# The NATIVE shim, by contrast, IS fully testable headless: the known-answer
-# harness builds it from source and drives it through ctypes, and the ASan/UBSan
-# self-test proves it memory-clean. Both run here on every push / PR.
+# The automated safety net CoinXT gets, in the family shape (SodiumXT /
+# TorrentXT): a fast always-green gate job, a native platform matrix that
+# builds the shared library from the committed sources on every push, and a
+# commit-binaries job that lands the freshly built libraries in
+# src/code/<arch>-<platform>/ on main so a clone ships a working extension.
+#
+# OXT is a GUI runtime with no headless way to compile or run .lcb /
+# .livecodescript, so the script layer is covered by the static gates only;
+# behaviour on a real engine is confirmed manually (CLAUDE.md). The NATIVE
+# shim, by contrast, IS fully testable headless: the known-answer harness
+# builds it from source and drives it through ctypes, and the ASan/UBSan
+# self-test proves it memory-clean.
+#
+# pull_request is intentionally omitted (the TorrentXT lesson): this is
+# same-repo branch development, so the push event already runs CI and its
+# commit checks show on the PR; running both would double the matrix per
+# push. Re-add `pull_request:` if forks ever contribute.
 
 on:
   push:
-  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   gates:
+    name: gates (static + KATs + ASan)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,3 +60,204 @@ jobs:
 
       - name: ASan + UBSan native self-test
         run: sh native/build.sh asan
+
+  # Integrity gate for the committed native blobs: every src/code/<id>/coinxt.*
+  # must be listed in src/code/MANIFEST.sha256 and match its recorded SHA256.
+  # This catches a committed binary that was swapped or corrupted without the
+  # manifest being regenerated. It does NOT prove a blob matches its source -
+  # that comes from the native/commit-binaries jobs rebuilding every platform
+  # from the pinned vendored sources - so this is the tamper/drift check that
+  # pairs with that rebuild. Before the first merge to main there are no
+  # committed blobs yet; that state passes cleanly.
+  verify-binaries:
+    name: committed binaries match src/code/MANIFEST.sha256
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every committed blob is listed, and every listed blob matches
+        run: |
+          if [ ! -d src/code ] && ! find . -path ./build -prune -o -type f \( -name 'coinxt.so' -o -name 'coinxt.dll' -o -name 'coinxt.dylib' \) -print | grep -q .; then
+            echo "No committed native blobs yet (they land on main via commit-binaries); nothing to verify."
+            exit 0
+          fi
+          cd src/code
+          test -f MANIFEST.sha256 || { echo "src/code exists but MANIFEST.sha256 is missing"; exit 1; }
+          # Fail if a coinxt.* blob exists that the manifest does not list.
+          missing=0
+          while IFS= read -r blob; do
+            rel="${blob#./}"
+            if ! grep -q -F "  $rel" MANIFEST.sha256; then
+              echo "committed blob not listed in MANIFEST.sha256: $rel"
+              missing=1
+            fi
+          done < <(find . -type f \( -name 'coinxt.so' -o -name 'coinxt.dll' -o -name 'coinxt.dylib' \))
+          [ "$missing" -eq 0 ] || exit 1
+          # Every listed blob exists and matches its recorded hash.
+          sha256sum -c MANIFEST.sha256
+
+  # Build the shared library from the committed sources on every platform the
+  # family ships. CoinXT has NO external dependency (the vendored sources are
+  # the whole supply chain), so every lane is a plain compile + ctest.
+  # Windows builds with MinGW via MSYS2, not MSVC: the vendored code uses
+  # gcc-isms (__attribute__((packed)) in blake2b.c) and vendored files are
+  # never patched (VENDOR.md) - a recorded divergence from the siblings with
+  # the same shipped result.
+  native:
+    name: native (${{ matrix.platform_id }})
+    needs: gates
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform_id: x86_64-linux
+            ext: so
+          - os: ubuntu-latest
+            platform_id: x86-linux
+            ext: so
+            multilib: true
+            cmake_args: "-DCMAKE_C_FLAGS=-m32"
+          - os: macos-latest
+            platform_id: universal-mac
+            ext: dylib
+            cmake_args: '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64'
+          - os: windows-latest
+            platform_id: x86_64-win32
+            ext: dll
+            msystem: MINGW64
+            msys_prefix: mingw-w64-x86_64
+          - os: windows-latest
+            platform_id: x86-win32
+            ext: dll
+            msystem: MINGW32
+            msys_prefix: mingw-w64-i686
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python (for package-extension.py)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install 32-bit toolchain (Linux x86)
+        if: matrix.multilib
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+
+      - name: Set up MSYS2 / MinGW (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: false
+          install: >-
+            ${{ matrix.msys_prefix }}-cc
+            ${{ matrix.msys_prefix }}-cmake
+            ${{ matrix.msys_prefix }}-ninja
+
+      - name: Configure, build, test (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCOINXT_BUILD_TESTS=ON ${{ matrix.cmake_args }}
+          cmake --build build --config Release -j
+          ctest --test-dir build --output-on-failure
+
+      - name: Configure, build, test (Windows / MinGW)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCOINXT_BUILD_TESTS=ON
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+
+      - name: Stage the native library into src/code/<id>/
+        shell: bash
+        run: python3 tools/package-extension.py --build-dir build --platform-id ${{ matrix.platform_id }}
+
+      - name: Upload native library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coinxt-${{ matrix.platform_id }}
+          path: src/code/${{ matrix.platform_id }}/coinxt.${{ matrix.ext }}
+          if-no-files-found: error
+
+  # A single artifact with every platform laid out in the src/code/<id>/ tree
+  # the packaged extension expects (convenient for a by-hand install).
+  bundle:
+    name: bundle all platforms
+    needs: native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          pattern: coinxt-*
+      - name: Lay out the src/code/<arch>-<platform>/ tree
+        run: |
+          mkdir -p src/code
+          for d in staged/coinxt-*; do
+            id="$(basename "$d" | sed 's/^coinxt-//')"
+            mkdir -p "src/code/$id"
+            cp "$d"/* "src/code/$id/"
+          done
+          echo "Bundled native libraries:"
+          find src/code -type f | sort
+      - name: Upload the combined bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: coinxt-all-platforms
+          path: src/code/**
+          if-no-files-found: error
+
+  # Commit the freshly built binaries back into src/code/<arch>-<platform>/ so
+  # a clone has a working extension on EVERY platform. Runs only on main (the
+  # TorrentXT lesson: CI builds are not byte-reproducible, so a per-branch
+  # binary commit collides with main's in an unresolvable add/add conflict;
+  # binaries land once, on main, after merge). The commit carries [skip ci] so
+  # it does not retrigger this workflow.
+  #
+  # Requires the workflow token to be able to push to main: `contents: write`
+  # (below) AND, if main is ever protected, an allowance for GitHub Actions to
+  # push to it (or this job fails at `git push`).
+  commit-binaries:
+    name: commit native binaries to main
+    needs: native
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          pattern: coinxt-*
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Lay binaries into src/code/<arch>-<platform>/
+        run: |
+          for d in staged/coinxt-*; do
+            id="$(basename "$d" | sed 's/^coinxt-//')"
+            [ "$id" = "all-platforms" ] && continue   # the combined bundle, not a platform
+            mkdir -p "src/code/$id"
+            cp "$d"/* "src/code/$id/"
+          done
+          echo "Native libraries staged into src/code:"
+          find src/code -type f | sort
+      - name: Regenerate the binary provenance manifest
+        run: python3 tools/package-extension.py --manifest-only
+      - name: Commit refreshed binaries (loop-guarded with [skip ci])
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/code
+          if git diff --cached --quiet; then
+            echo "Binaries unchanged; nothing to commit."
+            exit 0
+          fi
+          git commit -m "ci: refresh bundled native binaries for all platforms [skip ci]"
+          git push origin HEAD:main || \
+            echo "push rejected (branch advanced during the run); the next merge refreshes it."

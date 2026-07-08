@@ -83,11 +83,24 @@ shadow trap, the `put ... into ... after` malformation, and (for `.lcb`) a missi
 
 **The C shim builds under sanitizers** (from phase 1):
 ```sh
-cc -Wall -Wextra -fsanitize=address,undefined -isystem <trezor-crypto-dir> \
-   native/coinxt.c <vendored .c files> -shared -o coinxt.<ext>
+sh native/build.sh asan        # ASan + UBSan build of tests/coinxt_smoke_test.c, run
+sh native/build.sh             # plain shared lib, bare token name coinxt.<ext>
 ```
 Treat trezor-crypto headers as system headers (`-isystem`) so their warnings do not pollute `-Wall
 -Wextra`. Bump `cnx_abi_version()` + the `.lcb` `cxCheckABI()` on every ABI change.
+
+**The family build (CI matrix + packaging) is CMake** (the SodiumXT / TorrentXT model):
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCOINXT_BUILD_TESTS=ON
+cmake --build build && ctest --test-dir build --output-on-failure
+python3 tools/package-extension.py --build-dir build     # stage src/code/<arch>-<platform>/coinxt.<ext>
+```
+Keep the vendored-source list in `CMakeLists.txt` and `native/build.sh` in step. CI builds all five
+platform lanes (x86_64/x86 linux, universal-mac, x86_64/x86 win32) on every push and commits the
+refreshed binaries to `src/code/` on main only (`[skip ci]`; the TorrentXT lesson: a per-branch binary
+commit collides with main's in an unresolvable add/add conflict). Windows lanes build with MinGW
+(MSYS2), NOT MSVC: the vendored code uses gcc-isms (`__attribute__((packed))` in blake2b.c) and
+vendored files are never patched.
 
 **Known-answer vectors** (the correctness net for a money library):
 ```sh
@@ -220,10 +233,13 @@ future feature ever needs C-side state, use SodiumXT's generation-tagged handle-
 - A script change is "done" once the static gates pass and it has had (or is clearly flagged as needing)
   an on-engine pass. A shim change is "done" once it builds clean under ASan + UBSan, the KATs pass, and
   the ABI + `cxCheckABI()` are bumped in the SAME change.
-- A change that ships a native binary refreshes the committed per-platform binary AND a
-  `MANIFEST.sha256` in the same change (the SodiumXT model). Vendored trezor-crypto files are third-party
-  code: record the upstream commit and any local patch in `VENDOR.md`; hash the sources and the wordlist
-  in the manifest; never edit a vendored file in place silently.
+- Two manifests, two jobs (do not merge them): `native/MANIFEST.sha256` pins the vendored trezor-crypto
+  SOURCES; `src/code/MANIFEST.sha256` pins the committed native BINARIES (written by
+  `tools/package-extension.py`, verified by the CI `verify-binaries` job). A local native change
+  refreshes the binary for YOUR platform via `package-extension.py` in the same change; CI refreshes
+  all platforms on merge to main. Vendored trezor-crypto files are third-party code: record the
+  upstream commit and any local patch in `VENDOR.md`; hash the sources and the wordlist in
+  `native/MANIFEST.sha256`; never edit a vendored file in place silently.
 - A change that needs a new SodiumXT primitive (e.g. a specific KDF) splits: the upstream feature lands
   first, then CoinXT composes it.
 - **No em-dashes** in committed prose or docs. Comment the *why*, densely.
@@ -324,3 +340,34 @@ MIT file in `native/vendor/` covers only the vendored code) and protecting `main
 Next up: phase 3 (encodings and addresses, pure script, KAT-pinned) and the on-engine pass for the
 `.lcb` + `cx*` layer; then phase 4 (HD wallets + mnemonics; note bip32.c pulls the ed25519-donna
 subtree, so plan that vendoring deliberately).
+
+**Family build/CI, on-engine harness, and demo stack (2026-07-08, follow-up).** Pulled the packaging
+and example machinery forward to the SodiumXT / TorrentXT shape, after reading both siblings' repos:
+
+- `CMakeLists.txt` is the family build: one shared library from committed sources only (no external
+  dependency, unlike both siblings), bare token name `coinxt.<ext>` (PREFIX ""), Windows linking
+  bcrypt for the blinding RNG hook. `tests/coinxt_smoke_test.c` (promoted out of build.sh's heredoc)
+  runs under ctest on every lane AND under `build.sh asan`. `native/build.sh` stays as the
+  no-dependency developer loop; keep its vendor list in step with CMakeLists.txt.
+- `tools/package-extension.py` (adapted from SodiumXT) stages `src/code/<arch>-<platform>/coinxt.<ext>`
+  and writes `src/code/MANIFEST.sha256`. The engine resolves `"c:coinxt>"` from that packaged layout
+  via the revLibraryMapping; this settles the phase-1 open question about the binds-to library element
+  (same mechanism sodium.lcb uses, VERIFIED on-engine there).
+- CI now mirrors the siblings: the fast `gates` job (the original five), a 5-lane `native` matrix
+  (x86_64-linux, x86-linux -m32, universal-mac, x86_64/x86-win32 via MSYS2 MinGW; MSVC cannot build
+  the vendored gcc-isms and vendored files are never patched), `verify-binaries` (blob/manifest drift
+  gate, passes cleanly while src/code is still empty), `bundle`, and `commit-binaries` (main only,
+  `[skip ci]`, needs Actions "Read and write" workflow permissions to push). Trigger is push-only plus
+  workflow_dispatch (the TorrentXT lesson: pull_request would double every matrix run).
+- `src/coinxt.lcb` was re-aligned, construct for construct, with the VERIFIED-on-engine sodium.lcb:
+  `library org.openxtalk.library.coinxt` + metadata block, `use com.livecode.arithmetic` (for `<`),
+  `MCDataGetLength` as CUInt (uindex_t) instead of byte-chunk syntax, locals as Integer/CBool,
+  `_cnx_*` private foreign-handler names. One deliberate divergence, flagged in the header: an empty
+  Data never reaches `MCDataGetBytePtr` (a 1-byte module-lifetime sentinel is passed with length 0).
+- `examples/coinxt-tests.livecodescript` (`put cxSelfTest()`) re-pins the public vectors through the
+  real cx* API on-engine (hashes, RFC 4231 HMAC, PBKDF2, RFC 6979, ecrecover, ECDH, the negative
+  paths), reporting sPass/sFail like OnionXT's harness and skipping everything with one clear message
+  if the extension is not loaded. `examples/coinxt-demo.livecodescript` is the self-building showcase
+  stack (sodium-demo pattern: palette, prefix:role control names, one mouseUp router); its keys are
+  loudly PUBLIC (the "correct horse battery staple" derivation) with optional SodiumXT entropy,
+  capability-gated by try/catch. Both pass the static gate; both NEED AN ON-ENGINE PASS.

@@ -1,5 +1,3 @@
-script "CoinXT"
-
 /* coinxt.livecodescript - the CoinXT public API (cx*).
 
    CoinXT gives an xTalk app Bitcoin/Ethereum crypto primitives by wrapping
