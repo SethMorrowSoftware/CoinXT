@@ -1001,6 +1001,285 @@ def run_taproot_checks(lib, kat):
         kat.check(f"BIP-86 shim tweak {address[:12]}", rc == 0 and out.raw == ob, f"rc={rc}")
 
 
+# ---------------------------------------------------------------------------
+# Phase 5 script encoders: WIF, nested SegWit (P2SH-P2WPKH), the EIP-191
+# personal-message digest, and the Bech32/Bech32m SEGWIT-ADDRESS DECODER.
+# Like the phase-3 encoders these are livecodescript and cannot be driven
+# here; each reference below is the SAME algorithm the script implements
+# (transcribed 1:1 BEFORE pinning, the phase-3 discipline), locked to public
+# vectors, so the strings the on-engine harness pins cannot silently drift.
+
+# The famous published WIF pair of secret key 1, plus the testnet form
+# (recomputed by the reference encoder on every run, not trusted from memory).
+WIF_VECTORS = [
+    # (seckey int, compressed, mainnet, expected WIF)
+    (1, True, True, "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"),
+    (1, False, True, "5HpHagT65TZzG1PH3CSu63k8DbpvD8s5ip4nEB3kEsreAnchuDf"),
+    (1, True, False, "cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN87JcbXMTcA"),
+]
+# P2SH-P2WPKH (BIP-49 nested SegWit) of pubkey(1), mainnet and testnet.
+P2SH_P2WPKH_VECTORS = {
+    True: "3JvL6Ymt8MVWiCNHC7oWU6nLeHNJKLZGLN",
+    False: "2NAUYAHhujozruyzpsFRP63mbrdaU5wnEpN",
+}
+# EIP-191 personal-message digests: keccak256( 0x19 || "Ethereum Signed
+# Message:" || 0x0A || decimal byte length || message ). Pinned from the
+# reference keccak here (itself locked to the published Ethereum vectors)
+# and re-derived through the SHIM's keccak over the same preimage below, so
+# two independent implementations agree before the string is trusted.
+EIP191_VECTORS = {
+    b"hello":
+        "50b2c43fd39106bafbba0da34fc430e1f91e3c96ea2acee2bc34119f92b37750",
+    b"Pay Bob 1 ETH, nonce 7":
+        "c9b88db977ceecb8767c21e678b67a5580fc6a358fb05dd626631772a37e3de1",
+}
+# Bech32/Bech32m segwit-address decode vectors (BIP-173 + BIP-350 examples):
+# (address, expected hrp, expected witness version, expected program hex).
+BECH32_DECODE_VALID = [
+    ("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4", "bc", 0,
+     "751e76e8199196d454941c45d1b3a323f1433bd6"),
+    ("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7", "tb", 0,
+     "1863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262"),
+    ("bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7kt5nd6y",
+     "bc", 1,
+     "751e76e8199196d454941c45d1b3a323f1433bd6"
+     "751e76e8199196d454941c45d1b3a323f1433bd6"),
+    ("BC1SW50QGDZ25J", "bc", 16, "751e"),
+    ("bc1zw508d6qejxtdg4y5r3zarvaryvaxxpcs", "bc", 2,
+     "751e76e8199196d454941c45d1b3a323"),
+    ("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0", "bc", 1,
+     "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
+    # the BIP-86 first receiving address this repo already pins elsewhere;
+    # its program is the published BIP-86 output key
+    ("bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr", "bc", 1,
+     "a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c"),
+]
+# Malformed inputs the decoder must REJECT (each is genuinely invalid; the
+# reason in the comment was confirmed by the reference decoder, and several
+# are straight from the BIP-173/350 invalid lists).
+BECH32_DECODE_INVALID = [
+    "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5",   # one flipped char
+    "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3T4",   # mixed case
+    "BC1QW508d6QEJxTDG4y5R3ZArVARY0C5XW7KV8F3t4",   # mixed case (BIP-173)
+    "bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",   # v1 with a bech32 checksum
+    "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3pjxtptv",  # padding
+    "bc1gmk9yu",                                    # data part too short
+    "bc1q9zpgru",                                   # empty witness program
+    "qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",      # no separator / no hrp
+]
+
+_BECH32M_CONST = 0x2BC830A3
+
+
+def _wif(sk, compressed, mainnet):
+    version = 0x80 if mainnet else 0xEF
+    return _b58check(version, sk + (b"\x01" if compressed else b""))
+
+
+def _p2sh_p2wpkh(pub33, mainnet):
+    # redeem script = OP_0 PUSH20 hash160(pubkey), the P2WPKH witness program
+    redeem = b"\x00\x14" + _h160(pub33)
+    return _b58check(0x05 if mainnet else 0xC4, _h160(redeem))
+
+
+def _personal_hash(msg):
+    prefix = b"\x19Ethereum Signed Message:\n" + str(len(msg)).encode("ascii")
+    return _keccak256(prefix + msg)
+
+
+def _bech32_segwit_encode(hrp, witver, prog):
+    # general witness-program encode (v0 bech32, v1+ bech32m); used for the
+    # encode->decode round trips below.
+    const = 1 if witver == 0 else _BECH32M_CONST
+    data = [witver]
+    acc = bits = 0
+    for b in prog:
+        acc = (acc << 8) | b
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            data.append((acc >> bits) & 31)
+    if bits:
+        data.append((acc << (5 - bits)) & 31)
+    expand = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+    polymod = _bech32_polymod(expand + data + [0] * 6) ^ const
+    checksum = [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
+    return hrp + "1" + "".join(_BECH32[d] for d in data + checksum)
+
+
+def _bech32_decode(s):
+    """1:1 mirror of cxBech32Decode (src/coinxt.livecodescript). Returns
+    (hrp, witver, program) or an error string, exactly the script's
+    fail-closed branches in the same order."""
+    if len(s) > 90:
+        return "too long"
+    if s != s.lower() and s != s.upper():
+        return "mixed case"
+    s = s.lower()
+    sep = s.rfind("1")
+    if sep < 1:
+        return "no separator / empty hrp"
+    if len(s) - (sep + 1) < 7:
+        return "data part too short"
+    hrp = s[:sep]
+    for ch in hrp:
+        if ord(ch) < 33 or ord(ch) > 126:
+            return "bad hrp char"
+    values = []
+    for ch in s[sep + 1:]:
+        pos = _BECH32.find(ch)
+        if pos < 0:
+            return "bad data char"
+        values.append(pos)
+    witver = values[0]
+    if witver > 16:
+        return "bad witness version"
+    const = 1 if witver == 0 else _BECH32M_CONST
+    expand = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+    if _bech32_polymod(expand + values) != const:
+        return "bad checksum"
+    acc = bits = 0
+    prog = bytearray()
+    for v in values[1:-6]:
+        acc = (acc * 32) + v
+        bits += 5
+        if bits >= 8:
+            bits -= 8
+            prog.append((acc >> bits) & 255)
+            acc = acc & ((1 << bits) - 1)
+    if bits >= 5 or acc != 0:
+        return "bad padding"
+    if len(prog) < 2 or len(prog) > 40:
+        return "bad program length"
+    if witver == 0 and len(prog) not in (20, 32):
+        return "bad v0 program length"
+    return (hrp, witver, bytes(prog))
+
+
+def run_phase5_encoder_checks(lib, kat):
+    sk1 = sk_bytes(1)
+    for sk_int, compressed, mainnet, expected in WIF_VECTORS:
+        got = _wif(sk_bytes(sk_int), compressed, mainnet)
+        kat.check(f"WIF vector locked (sk={sk_int}, c={compressed}, m={mainnet})",
+                  got == expected, got)
+    pub33 = pubkey(lib, sk1, True)
+    for mainnet, expected in P2SH_P2WPKH_VECTORS.items():
+        got = _p2sh_p2wpkh(pub33, mainnet)
+        kat.check(f"P2SH-P2WPKH vector locked (mainnet={mainnet})",
+                  got == expected, got)
+    # EIP-191: the pinned digest, the shim's keccak over the same preimage,
+    # and the full personal_sign -> ecrecover -> address round trip
+    for msg, expected in EIP191_VECTORS.items():
+        pre = (b"\x19Ethereum Signed Message:\n"
+               + str(len(msg)).encode("ascii") + msg)
+        kat.check(f"EIP-191 reference digest ({msg[:10]}...)",
+                  _personal_hash(msg).hex() == expected)
+        kat.check(f"EIP-191 shim keccak agrees ({msg[:10]}...)",
+                  digest(lib, "cnx_keccak256", pre).hex() == expected)
+    d = _personal_hash(b"hello")
+    sig = ctypes.create_string_buffer(65)
+    rec = ctypes.create_string_buffer(65)
+    ok = (lib.cnx_ecdsa_sign_recoverable(sk1, d, sig) == 0
+          and lib.cnx_ecdsa_recover(sig.raw, d, rec) == 0)
+    kat.check("EIP-191 sign -> ecrecover -> signer address",
+              ok and _eth_address(rec.raw) == _eth_address(pubkey(lib, sk1, False)))
+    # bech32/bech32m decode: every valid vector yields exactly its program...
+    for s, hrp, wv, prog_hex in BECH32_DECODE_VALID:
+        got = _bech32_decode(s)
+        ok = (not isinstance(got, str) and got[0] == hrp and got[1] == wv
+              and got[2].hex() == prog_hex)
+        kat.check(f"bech32 decode valid: {s[:28]}...", ok,
+                  got if isinstance(got, str) else got[2].hex())
+    # ...every malformed input is rejected...
+    for s in BECH32_DECODE_INVALID:
+        got = _bech32_decode(s)
+        kat.check(f"bech32 decode rejects: {s[:28]}...",
+                  isinstance(got, str), f"ACCEPTED {got}")
+    # ...and encode->decode round trips over the shapes CoinXT emits
+    for wv, prog in [(0, _h160(pub33)), (0, bytes(32)),
+                     (1, bytes.fromhex(BECH32_DECODE_VALID[6][3])),
+                     (16, b"\x75\x1e")]:
+        enc = _bech32_segwit_encode("bc", wv, prog)
+        kat.check(f"bech32 encode->decode round trip (v{wv}, {len(prog)}B)",
+                  _bech32_decode(enc) == ("bc", wv, prog))
+
+
+# ---------------------------------------------------------------------------
+# The wallet-restore path (the demo's headline feature): the canonical BIP-39
+# test mnemonic restores, through the SHIM's real HD-node derivation, to the
+# OFFICIAL BIP-84 and BIP-86 first addresses (those two strings are printed
+# in the BIPs themselves, so they anchor the whole chain: mnemonic -> seed ->
+# path -> key -> address), plus the widely published BIP-44 / BIP-49 /
+# Ethereum m/44'/60' firsts, the BIP-84 account xpub, and the first key's
+# WIF. These are exactly the strings the demo's Restore button must show.
+RESTORE_MNEMONIC = ("abandon abandon abandon abandon abandon abandon abandon "
+                    "abandon abandon abandon abandon about")
+RESTORE_VECTORS = {
+    "m/44'/0'/0'/0/0": ("p2pkh", "1LqBGSKuX5yYUonjxT5qGfpUsXKYYWeabA"),
+    "m/49'/0'/0'/0/0": ("p2sh-p2wpkh", "37VucYSaXLCAsxYyAPfbSi9eh4iEcbShgf"),
+    "m/84'/0'/0'/0/0": ("p2wpkh",
+                        "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"),
+    "m/86'/0'/0'/0/0": ("p2tr",
+                        "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"),
+    "m/44'/60'/0'/0/0": ("eth", "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"),
+}
+RESTORE_ACCOUNT_XPUB = (
+    "m/84'/0'/0'",
+    "xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAP"
+    "shWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V")
+RESTORE_FIRST_WIF = "KyZpNDKnfs94vbrwhJneDi77V6jF64PWPF8x5cdJb8ifgg2DUc9d"
+
+
+def _hd_derive_path(lib, seed, path):
+    node = ctypes.create_string_buffer(73)
+    rc = lib.cnx_hdnode_from_seed(seed, len(seed), node)
+    if rc != 0:
+        return None
+    for part in path.split("/")[1:]:
+        hardened = part.endswith("'")
+        index = int(part.rstrip("'"))
+        child = ctypes.create_string_buffer(73)
+        rc = lib.cnx_hdnode_derive(node.raw, index, 1 if hardened else 0, child)
+        if rc != 0:
+            return None
+        node = child
+    return node.raw
+
+
+def run_restore_checks(lib, kat):
+    seed = hashlib.pbkdf2_hmac("sha512", RESTORE_MNEMONIC.encode("ascii"),
+                               b"mnemonic", 2048, 64)
+    for path, (kind, expected) in RESTORE_VECTORS.items():
+        blob = _hd_derive_path(lib, seed, path)
+        if blob is None:
+            kat.check(f"restore {path}", False, "derivation failed")
+            continue
+        pub33 = pubkey(lib, blob[41:73], True)
+        if kind == "p2pkh":
+            got = _b58check(0x00, _h160(pub33))
+        elif kind == "p2sh-p2wpkh":
+            got = _p2sh_p2wpkh(pub33, True)
+        elif kind == "p2wpkh":
+            got = _bech32_p2wpkh("bc", _h160(pub33))
+        elif kind == "p2tr":
+            out = ctypes.create_string_buffer(32)
+            rc = lib.cnx_taproot_tweak_pubkey(pub33[1:], out)
+            got = _bech32m_p2tr("bc", out.raw) if rc == 0 else "tweak failed"
+        else:
+            got = _eth_address(pubkey(lib, blob[41:73], False))
+        kat.check(f"restore {path} -> {kind}", got == expected, got)
+    # the watch-only account xpub the demo prints (BIP-84 account level)
+    path, expected = RESTORE_ACCOUNT_XPUB
+    blob = _hd_derive_path(lib, seed, path)
+    got = _b58check_body(XPUB_VERSION + blob[0:41]
+                         + pubkey(lib, blob[41:73], True))
+    kat.check(f"restore {path} account xpub", got == expected, got)
+    # the first BIP-84 key's WIF (the demo's export-a-single-key line)
+    blob = _hd_derive_path(lib, seed, "m/84'/0'/0'/0/0")
+    got = _wif(blob[41:73], True, True)
+    kat.check("restore first-key WIF", got == RESTORE_FIRST_WIF, got)
+
+
 def main(argv):
     check = "--check" in argv[1:]
     cc = find_cc()
@@ -1030,6 +1309,8 @@ def main(argv):
         run_hd_checks(lib, kat)
         run_schnorr_checks(lib, kat)
         run_taproot_checks(lib, kat)
+        run_phase5_encoder_checks(lib, kat)
+        run_restore_checks(lib, kat)
 
     if kat.problems:
         for p in kat.problems:

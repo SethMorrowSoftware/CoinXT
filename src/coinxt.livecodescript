@@ -632,6 +632,115 @@ function cxBech32Encode pHrp, pWitVer, pProgram
    return tOut
 end cxBech32Encode
 
+-- Bech32 (witness v0) / Bech32m (v1+) DECODE of a SegWit address: the exact
+-- inverse of cxBech32Encode, failing closed on everything BIP-173/350 reject:
+-- mixed case, a bad character, a bad checksum, the wrong checksum constant
+-- for the witness version (a v0 address must be bech32, v1+ bech32m), bad
+-- 5->8 padding, and a bad program length (2..40 bytes; v0 exactly 20 or 32).
+-- Returns hrp & LF & witness version & LF & program (Data, LAST, so callers
+-- take `line 3 to -1`), or a CoinXT: error. The algorithm was transcribed 1:1
+-- to Python and locked to the BIP-173/350 valid AND invalid vectors in
+-- tools/coin-kat.py; the on-engine harness re-runs the same vectors.
+function cxBech32Decode pString
+   local tCharset
+   local tLower
+   local tSep
+   local tIdx
+   local tHrp
+   local tCode
+   local tValues
+   local tPos
+   local tWitVer
+   local tConst
+   local tAcc
+   local tBits
+   local tProgram
+   local tLen
+   -- the charset lookup and the case checks below must be case-EXACT, but
+   -- `is` and `offset` default to caseSensitive FALSE (the Base58 lesson,
+   -- item 5.10). Local to this handler, reverts on exit.
+   set the caseSensitive to true
+   put "qpzry9x8gf2tvdw0s3jn54khce6mua7l" into tCharset
+   if the number of chars in pString > 90 then
+      return "CoinXT: Bech32 string longer than 90 characters (cxBech32Decode)"
+   end if
+   -- BIP-173: a mixed-case string is invalid (all-lower or all-upper only)
+   if pString is not toLower(pString) and pString is not toUpper(pString) then
+      return "CoinXT: mixed-case Bech32 string (cxBech32Decode)"
+   end if
+   put toLower(pString) into tLower
+   -- the separator is the LAST "1" (the HRP itself may contain "1"s)
+   put 0 into tSep
+   repeat with tIdx = 1 to the number of chars in tLower
+      if char tIdx of tLower is "1" then
+         put tIdx into tSep
+      end if
+   end repeat
+   if tSep < 2 then
+      return "CoinXT: no Bech32 separator / empty prefix (cxBech32Decode)"
+   end if
+   -- the witness version plus 6 checksum chars is the minimum data part
+   if (the number of chars in tLower) - tSep < 7 then
+      return "CoinXT: Bech32 data part too short (cxBech32Decode)"
+   end if
+   put char 1 to (tSep - 1) of tLower into tHrp
+   repeat with tIdx = 1 to the number of chars in tHrp
+      put charToNum(char tIdx of tHrp) into tCode
+      if tCode < 33 or tCode > 126 then
+         return "CoinXT: bad character in Bech32 prefix (cxBech32Decode)"
+      end if
+   end repeat
+   -- map every data char to its 5-bit value
+   put empty into tValues
+   repeat with tIdx = (tSep + 1) to the number of chars in tLower
+      put offset(char tIdx of tLower, tCharset) into tPos
+      if tPos is 0 then
+         return "CoinXT: bad Bech32 data character (cxBech32Decode)"
+      end if
+      put numToByte(tPos - 1) after tValues
+   end repeat
+   -- BIP-350: the expected checksum constant DEPENDS on the witness version
+   put byteToNum(byte 1 of tValues) into tWitVer
+   if tWitVer > 16 then
+      return "CoinXT: witness version above 16 (cxBech32Decode)"
+   end if
+   if tWitVer is 0 then
+      put 1 into tConst
+   else
+      put 734539939 into tConst
+   end if
+   if cxBechPolymod(cxBechHrpExpand(tHrp) & tValues) is not tConst then
+      return "CoinXT: bad Bech32 checksum (cxBech32Decode)"
+   end if
+   -- 5->8 bit repack of the program (drop the witver value and the final 6
+   -- checksum values); the accumulator is MASKED each step so it never grows
+   -- past 2^13 (the OnionXT base32 discipline)
+   put 0 into tAcc
+   put 0 into tBits
+   put empty into tProgram
+   repeat with tIdx = 2 to (the number of bytes in tValues - 6)
+      put (tAcc * 32) + byteToNum(byte tIdx of tValues) into tAcc
+      add 5 to tBits
+      if tBits >= 8 then
+         subtract 8 from tBits
+         put numToByte((tAcc div cxPow2(tBits)) mod 256) after tProgram
+         put tAcc mod cxPow2(tBits) into tAcc
+      end if
+   end repeat
+   -- strict padding (BIP-173): under 5 leftover bits, and all of them zero
+   if tBits >= 5 or tAcc is not 0 then
+      return "CoinXT: bad Bech32 padding (cxBech32Decode)"
+   end if
+   put the number of bytes in tProgram into tLen
+   if tLen < 2 or tLen > 40 then
+      return "CoinXT: witness program must be 2..40 bytes (cxBech32Decode)"
+   end if
+   if tWitVer is 0 and tLen is not 20 and tLen is not 32 then
+      return "CoinXT: a v0 witness program must be 20 or 32 bytes (cxBech32Decode)"
+   end if
+   return tHrp & return & tWitVer & return & tProgram
+end cxBech32Decode
+
 -- ---- Ethereum address (EIP-55) ----
 
 -- uppercase a hex string's letters where the matching nibble of
@@ -699,6 +808,22 @@ function cxEthAddressChecksum pAddress
    return "0x" & cxEip55(toLower(tHex))
 end cxEthAddressChecksum
 
+-- EIP-191 "personal message" digest: keccak256 of 0x19 || "Ethereum Signed
+-- Message:" || 0x0A || the message's DECIMAL byte length || the message.
+-- This is the digest wallets' personal_sign / eth_sign flows hash (the
+-- prefix makes a signed message unusable as a transaction). Sign it with
+-- cxSignRecoverable; cxRecover + cxEthAddress then recover the signing
+-- ADDRESS from the signature alone, the Ethereum sign-in flow. pMessage is
+-- Data (textEncode at the boundary, as everywhere in this API).
+function cxEthPersonalHash pMessage
+   local tLen
+   local tPreimage
+   put the number of bytes in pMessage into tLen
+   put numToByte(25) & textEncode("Ethereum Signed Message:", "ascii") \
+      & numToByte(10) & textEncode(tLen, "ascii") & pMessage into tPreimage
+   return cxKeccak256(tPreimage)
+end cxEthPersonalHash
+
 -- ---- Bitcoin addresses ----
 
 -- legacy P2PKH: Base58Check( version || hash160(pubkey) ). pMainnet defaults true.
@@ -733,8 +858,114 @@ function cxBtcAddressP2WPKH pPubkey, pMainnet
    return cxBech32Encode(tHrp, 0, tH160)
 end cxBtcAddressP2WPKH
 
-----------------------------------------------------------------------
--- BIP-39 mnemonics (PURE SCRIPT; phase 4a)
+-- nested SegWit P2SH-P2WPKH (BIP-49, the "3..." form every pre-SegWit wallet
+-- can pay): Base58Check( 0x05 | 0xC4, hash160( 0x0014 || hash160(pubkey) ) ).
+-- BIP-49 requires the COMPRESSED pubkey; a 65-byte key would make a
+-- different script whose coins standard wallets cannot spend, so any other
+-- length fails closed. pMainnet defaults true.
+function cxBtcAddressP2SH_P2WPKH pPubkey, pMainnet
+   local tH160
+   local tRedeem
+   local tScriptHash
+   local tVersion
+   if the number of bytes in pPubkey is not 33 then
+      return "CoinXT: P2SH-P2WPKH needs the 33-byte compressed pubkey (cxBtcAddressP2SH_P2WPKH)"
+   end if
+   put cxHash160(pPubkey) into tH160
+   if cxIsError(tH160) then
+      return tH160 && "(cxBtcAddressP2SH_P2WPKH)"
+   end if
+   -- the redeem script is the P2WPKH witness program: OP_0 PUSH20 <hash160>
+   put numToByte(0) & numToByte(20) & tH160 into tRedeem
+   put cxHash160(tRedeem) into tScriptHash
+   if cxIsError(tScriptHash) then
+      return tScriptHash && "(cxBtcAddressP2SH_P2WPKH)"
+   end if
+   if pMainnet is false then
+      put 196 into tVersion
+   else
+      put 5 into tVersion
+   end if
+   return cxBase58CheckEncode(tVersion, tScriptHash)
+end cxBtcAddressP2SH_P2WPKH
+
+-- ---- WIF (wallet import format) private-key serialization ----
+
+-- WIF-encode a 32-byte secret key: Base58Check( 0x80 mainnet / 0xEF testnet,
+-- seckey || 0x01 when the corresponding pubkey is compressed ). This is the
+-- form every mainstream wallet imports and exports single keys in. THE
+-- RESULT IS THE PRIVATE KEY: treat the string as a secret and clear your
+-- copy when done. pCompressed and pMainnet default true.
+function cxWifEncode pSeckey, pCompressed, pMainnet
+   local tVersion
+   local tPayload
+   local tOut
+   if cxSeckeyValidate(pSeckey) is false then
+      return "CoinXT: not a valid 32-byte secret key (cxWifEncode)"
+   end if
+   if pMainnet is false then
+      put 239 into tVersion
+   else
+      put 128 into tVersion
+   end if
+   put pSeckey into tPayload
+   if pCompressed is not false then
+      put numToByte(1) after tPayload
+   end if
+   put cxBase58CheckEncode(tVersion, tPayload) into tOut
+   put empty into tPayload
+   return tOut
+end cxWifEncode
+
+-- WIF-decode. Verifies the Base58Check checksum, the WIF version byte, the
+-- payload shape (32 bytes, or 33 with the 0x01 compressed marker), and the
+-- key range, failing closed on all of them. Returns network ("mainnet" or
+-- "testnet") & LF & compressed (true/false) & LF & the 32-byte secret key
+-- (LAST, so take `line 3 to -1`). The key is a SECRET: clear your copy the
+-- moment you are done with it.
+function cxWifDecode pWif
+   local tDecoded
+   local tVersion
+   local tPayload
+   local tNetwork
+   local tCompressed
+   local tKey
+   local tOut
+   put cxBase58CheckDecode(pWif) into tDecoded
+   if cxIsError(tDecoded) then
+      return tDecoded && "(cxWifDecode)"
+   end if
+   put line 1 of tDecoded into tVersion
+   put line 2 to -1 of tDecoded into tPayload
+   put empty into tDecoded
+   if tVersion is 128 then
+      put "mainnet" into tNetwork
+   else if tVersion is 239 then
+      put "testnet" into tNetwork
+   else
+      put empty into tPayload
+      return "CoinXT: not a WIF version byte (cxWifDecode)"
+   end if
+   if the number of bytes in tPayload is 33 and byteToNum(byte 33 of tPayload) is 1 then
+      put true into tCompressed
+      put byte 1 to 32 of tPayload into tKey
+   else if the number of bytes in tPayload is 32 then
+      put false into tCompressed
+      put tPayload into tKey
+   else
+      put empty into tPayload
+      return "CoinXT: not a WIF payload (32 or 33 bytes) (cxWifDecode)"
+   end if
+   put empty into tPayload
+   if cxSeckeyValidate(tKey) is false then
+      put empty into tKey
+      return "CoinXT: WIF decodes to an out-of-range key (cxWifDecode)"
+   end if
+   put tNetwork & return & tCompressed & return & tKey into tOut
+   put empty into tKey
+   return tOut
+end cxWifDecode
+
 --
 -- entropy <-> words + the checksum word are pure bytes over cxSha256; the
 -- mnemonic -> seed step is PBKDF2-HMAC-SHA512 (cxPbkdf2HmacSha512), 2048

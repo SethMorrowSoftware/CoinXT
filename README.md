@@ -78,8 +78,10 @@ CoinXT/
     check-docs-style.py     the house-style gate for .md (carried verbatim)
   examples/
     coinxt-demo.livecodescript    the self-building showcase stack: a branded, tabbed UI
-                                  (keys, BTC + ETH addresses, sign/verify/tamper, ecrecover, ECDH,
-                                  the Keccak-vs-SHA3 footgun, HMAC/PBKDF2 BIP-39 seed, self-test)
+                                  (keys + WIF, five address forms with a testnet toggle,
+                                  ECDSA and Schnorr sign/verify/tamper, EIP-191 personal_sign +
+                                  ecrecover, ECDH, the Keccak-vs-SHA3 footgun, wallet RESTORE
+                                  from any BIP-39 phrase, a decode-anything inspector, self-test)
     coinxt-tests.livecodescript   the on-engine self-test harness: put cxSelfTest()
 ```
 
@@ -123,10 +125,12 @@ reasoned; needs an on-engine pass", and the on-engine self-test harness
 (`examples/coinxt-demo.livecodescript`) are ready for that pass; the phases 1-3 stack ran 41/41 on a
 real engine (see [CLAUDE.md](CLAUDE.md)); the ABI-3 additions need their own pass. The build and
 packaging follow the family model: a CMake build, a 5-platform CI matrix, and per-platform binaries
-committed under `src/code/` on main. Addresses and BIP-39 mnemonics are pure script: hex,
-Base58Check, Bech32/Bech32m, EIP-55, the BTC (P2PKH, P2WPKH, P2TR) + ETH address builders, xprv/xpub
-framing, and the BIP-39 mnemonic surface over the embedded 2048-word list - all transcription-verified
-against Python and vector-locked in CI (BIP-173/350, BIP-86, EIP-55, Trezor BIP-39, BIP-32).
+committed under `src/code/` on main. Addresses, key serialization, and BIP-39 mnemonics are pure
+script: hex, Base58Check, Bech32/Bech32m (encode AND decode), WIF, EIP-55, EIP-191 personal-message
+hashing, the BTC (P2PKH, P2SH-P2WPKH, P2WPKH, P2TR) + ETH address builders, xprv/xpub framing, and
+the BIP-39 mnemonic surface over the embedded 2048-word list - all transcription-verified against
+Python and vector-locked in CI (BIP-173/350, BIP-49/84/86, EIP-55, Trezor BIP-39, BIP-32, the
+published WIF vectors, and the canonical-mnemonic wallet-restore path).
 
 [SPEC.md](SPEC.md), [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md), and [CLAUDE.md](CLAUDE.md) are the
 design and the running as-built log. Every deterministic path is pinned to a public known-answer vector,
