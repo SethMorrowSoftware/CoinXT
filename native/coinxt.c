@@ -4,32 +4,66 @@
  * app can reach Bitcoin/Ethereum crypto through one LCB foreign module. This file
  * is the ENTIRE native surface (SPEC.md section 5.1): every export is buffer-in /
  * buffer-out, returns an int status, and is deterministic. No I/O, no global
- * state, no ambient RNG (RFC 6979 signing needs none; fresh key material is the
- * caller's, per SPEC.md section 4).
+ * state (SPEC.md section 4).
  *
- * Phase 1: the hash surface + the ABI guard + the length functions. The curve
- * (secp256k1), HD (BIP-32), and mnemonic (BIP-39) exports land in later phases;
- * the ABI contract they all follow is fixed here.
+ * Phase 1: the full hash/KDF surface + the ABI guard + the length functions.
+ * Phase 2: the secp256k1 curve surface (pubkey, ECDSA/RFC 6979, recoverable,
+ * recover, ECDH). HD (BIP-32) and mnemonic (BIP-39) exports land in later
+ * phases; Schnorr / BIP-340 is deferred until the Taproot phase because this
+ * upstream commit provides it only through secp256k1-zkp (see VENDOR.md).
  *
  * ABI rules (CLAUDE.md, carried family FFI law):
  *  - byte buffers cross as Pointer + length; sizes are size_t;
  *  - every function returns int (0 ok, negative error);
  *  - never return a bridged/owned C string;
  *  - every length is a function, never a hardcoded LCB constant;
- *  - cnx_abi_version() gates a stale binary via the .lcb cxCheckABI().
+ *  - cnx_abi_version() gates a stale binary via the .lcb cxCheckABI();
+ *  - fixed-size buffers (a 32-byte seckey, a 32-byte digest, a 64/65-byte
+ *    signature) cross WITHOUT a redundant length argument; the LCB layer
+ *    validates lengths against the cnx_*_len() functions before the call.
+ *    Genuinely variable-length buffers (hash input, HMAC key/message, a
+ *    33-or-65-byte pubkey) always cross with their length.
  */
 
+#include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
 
-#include "sha3.h" /* vendored trezor-crypto: keccak_256 / sha3_256 (one-shot) */
+#include "ecdsa.h"     /* vendored trezor-crypto: sign/verify/recover/ECDH   */
+#include "bignum.h"    /* scalar range check for cnx_seckey_verify           */
+#include "hmac.h"      /* HMAC-SHA256 / HMAC-SHA512                          */
+#include "memzero.h"   /* best-effort wiping of secret temporaries           */
+#include "pbkdf2.h"    /* PBKDF2-HMAC-SHA512 (BIP-39 seed derivation)        */
+#include "rand.h"      /* declares the integrator hook we implement below    */
+#include "ripemd160.h" /* RIPEMD-160 (Bitcoin hash160)                       */
+#include "secp256k1.h" /* the one curve CoinXT exposes                       */
+#include "sha2.h"      /* SHA-256 / SHA-512                                  */
+#include "sha3.h"      /* keccak_256 / sha3_256 (one-shot)                   */
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h> /* BCryptGenRandom; link with -lbcrypt */
+#elif defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__) || \
+    defined(__NetBSD__)
+#include <stdlib.h> /* arc4random_buf */
+#else
+#include <errno.h>
+#include <stdio.h>
+#include <sys/random.h> /* getrandom(2), glibc >= 2.25 and musl */
+#endif
 
 /* ---- ABI version + status codes (stable; never renumber a shipped code) ---- */
 
-#define CNX_ABI_VERSION 1
+#define CNX_ABI_VERSION 2 /* 2: phase-2 curve surface added (2026-07-08) */
 
 #define CNX_OK 0
-#define CNX_ERR_NULL (-1)   /* a required buffer pointer was NULL */
-#define CNX_ERR_BADLEN (-2) /* a fixed-size buffer had the wrong length (LCB layer checks) */
+#define CNX_ERR_NULL (-1)     /* a required buffer pointer was NULL */
+#define CNX_ERR_BADLEN (-2)   /* a length argument was out of range */
+#define CNX_ERR_BADKEY (-3)   /* seckey out of range, or pubkey not on the curve */
+#define CNX_ERR_BADSIG (-4)   /* signature malformed, or does not verify */
+#define CNX_ERR_RANGE (-5)    /* a numeric argument was out of range */
+#define CNX_ERR_INTERNAL (-6) /* upstream failed on validated input (a bug) */
 
 int cnx_abi_version(void) { return CNX_ABI_VERSION; }
 
@@ -37,33 +71,309 @@ int cnx_abi_version(void) { return CNX_ABI_VERSION; }
 
 size_t cnx_keccak256_len(void) { return 32; }
 size_t cnx_sha3_256_len(void) { return 32; }
+size_t cnx_sha256_len(void) { return 32; }
+size_t cnx_sha512_len(void) { return 64; }
+size_t cnx_ripemd160_len(void) { return 20; }
+size_t cnx_hmac_sha256_len(void) { return 32; }
+size_t cnx_hmac_sha512_len(void) { return 64; }
+size_t cnx_seckey_len(void) { return 32; }
+size_t cnx_pubkey_len_compressed(void) { return 33; }
+size_t cnx_pubkey_len_uncompressed(void) { return 65; }
+size_t cnx_ecdsa_sig_len(void) { return 64; }
+size_t cnx_recoverable_sig_len(void) { return 65; }
+size_t cnx_digest_len(void) { return 32; }
+size_t cnx_ecdh_secret_len(void) { return 32; }
+
+/* ---- the trezor-crypto integrator RNG hook --------------------------------
+ * The phase-0 assumption was that nothing calls this once signing is RFC 6979
+ * and key material comes from the caller. That is FALSE at the vendored
+ * commit: ecdsa.c calls random32() on EVERY curve operation for side-channel
+ * blinding (curve_to_jacobian randomizes the Jacobian z coordinate; the
+ * signing path additionally splits the nonce with a random scalar). That
+ * randomness never reaches an output: every cnx_ result is still a pure
+ * function of its inputs and stays KAT-pinned. So instead of aborting (which
+ * would break every call) or a weak stub (which would silently defeat
+ * upstream's hardening), we feed it the OS CSPRNG and fail LOUDLY (abort) if
+ * the OS cannot supply entropy, because continuing would quietly downgrade
+ * the side-channel protection around live private keys.
+ * Fresh KEY material still never comes from here; it is the caller's
+ * (SPEC.md section 4). */
+
+void random_buffer(uint8_t *buf, size_t len) {
+#if defined(_WIN32)
+  if (BCryptGenRandom(NULL, buf, (ULONG)len,
+                      BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+    abort();
+#elif defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__) || \
+    defined(__NetBSD__)
+  arc4random_buf(buf, len);
+#else
+  size_t off = 0;
+  while (off < len) {
+    ssize_t got = getrandom(buf + off, len - off, 0);
+    if (got < 0) {
+      if (errno == EINTR) continue;
+      abort();
+    }
+    off += (size_t)got;
+  }
+#endif
+}
+
+/* ---- secret hygiene helper --------------------------------------------------
+ * The LCB layer marshals out-buffers through engine MCMemoryAllocate blocks.
+ * When such a block carried a secret (an ECDH shared secret; HD seckeys in a
+ * later phase) it must be zeroed BEFORE MCMemoryDeallocate, with the same
+ * best-effort memzero the vendored code uses, so the secret does not linger in
+ * freed heap. Exposed as a cnx_ call because the LCB layer has no wipe of its
+ * own. */
+
+int cnx_wipe(unsigned char *buf, size_t len) {
+  if (buf == NULL) return len == 0 ? CNX_OK : CNX_ERR_NULL;
+  memzero(buf, len);
+  return CNX_OK;
+}
 
 /* ---- hashes -----------------------------------------------------------------
  * Ethereum's "SHA3" is Keccak-256 (original 0x01 padding); NIST SHA3-256 uses
  * 0x06. They are DIFFERENT functions and must never be aliased (the classic
  * Ethereum footgun). trezor-crypto exposes both one-shot; we surface both.
- * out32 is a caller-allocated 32-byte buffer. An empty input is valid (in may be
- * NULL only when inlen == 0; we substitute a valid pointer so no hash internal
- * ever dereferences NULL). */
+ * Every out buffer is caller-allocated at the matching cnx_*_len() size. An
+ * empty input is valid (in may be NULL only when inlen == 0; we substitute a
+ * valid pointer so no hash internal ever dereferences NULL). */
 
 static const unsigned char cnx_empty[1] = {0};
 
+static int cnx_fix_null(const unsigned char **in, size_t inlen) {
+  if (*in == NULL) {
+    if (inlen != 0) return CNX_ERR_NULL;
+    *in = cnx_empty;
+  }
+  return CNX_OK;
+}
+
 int cnx_keccak256(const unsigned char *in, size_t inlen, unsigned char *out32) {
   if (out32 == NULL) return CNX_ERR_NULL;
-  if (in == NULL) {
-    if (inlen != 0) return CNX_ERR_NULL;
-    in = cnx_empty;
-  }
+  if (cnx_fix_null(&in, inlen) != CNX_OK) return CNX_ERR_NULL;
   keccak_256(in, inlen, out32);
   return CNX_OK;
 }
 
 int cnx_sha3_256(const unsigned char *in, size_t inlen, unsigned char *out32) {
   if (out32 == NULL) return CNX_ERR_NULL;
-  if (in == NULL) {
-    if (inlen != 0) return CNX_ERR_NULL;
-    in = cnx_empty;
-  }
+  if (cnx_fix_null(&in, inlen) != CNX_OK) return CNX_ERR_NULL;
   sha3_256(in, inlen, out32);
+  return CNX_OK;
+}
+
+int cnx_sha256(const unsigned char *in, size_t inlen, unsigned char *out32) {
+  if (out32 == NULL) return CNX_ERR_NULL;
+  if (cnx_fix_null(&in, inlen) != CNX_OK) return CNX_ERR_NULL;
+  sha256_Raw(in, inlen, out32);
+  return CNX_OK;
+}
+
+int cnx_sha512(const unsigned char *in, size_t inlen, unsigned char *out64) {
+  if (out64 == NULL) return CNX_ERR_NULL;
+  if (cnx_fix_null(&in, inlen) != CNX_OK) return CNX_ERR_NULL;
+  sha512_Raw(in, inlen, out64);
+  return CNX_OK;
+}
+
+int cnx_ripemd160(const unsigned char *in, size_t inlen, unsigned char *out20) {
+  if (out20 == NULL) return CNX_ERR_NULL;
+  if (cnx_fix_null(&in, inlen) != CNX_OK) return CNX_ERR_NULL;
+  ripemd160(in, inlen, out20);
+  return CNX_OK;
+}
+
+/* HMAC: upstream takes uint32_t lengths, so a size_t crossing 4 GiB would
+ * silently truncate; refuse it instead (no sane MAC input is that large). An
+ * empty KEY is legal HMAC (padded), so it gets the same NULL-with-zero fix. */
+
+int cnx_hmac_sha256(const unsigned char *key, size_t keylen,
+                    const unsigned char *msg, size_t msglen,
+                    unsigned char *out32) {
+  if (out32 == NULL) return CNX_ERR_NULL;
+  if (cnx_fix_null(&key, keylen) != CNX_OK) return CNX_ERR_NULL;
+  if (cnx_fix_null(&msg, msglen) != CNX_OK) return CNX_ERR_NULL;
+  if (keylen > UINT32_MAX || msglen > UINT32_MAX) return CNX_ERR_BADLEN;
+  hmac_sha256(key, (uint32_t)keylen, msg, (uint32_t)msglen, out32);
+  return CNX_OK;
+}
+
+int cnx_hmac_sha512(const unsigned char *key, size_t keylen,
+                    const unsigned char *msg, size_t msglen,
+                    unsigned char *out64) {
+  if (out64 == NULL) return CNX_ERR_NULL;
+  if (cnx_fix_null(&key, keylen) != CNX_OK) return CNX_ERR_NULL;
+  if (cnx_fix_null(&msg, msglen) != CNX_OK) return CNX_ERR_NULL;
+  if (keylen > UINT32_MAX || msglen > UINT32_MAX) return CNX_ERR_BADLEN;
+  hmac_sha512(key, (uint32_t)keylen, msg, (uint32_t)msglen, out64);
+  return CNX_OK;
+}
+
+/* PBKDF2-HMAC-SHA512. iters crosses as a plain int (a BIP-39 seed uses 2048;
+ * nothing legitimate needs > 2^31). outlen is the caller's requested key
+ * length; upstream takes int lengths, so both are range-checked. A password or
+ * salt may legally be empty. */
+
+int cnx_pbkdf2_hmac_sha512(const unsigned char *pw, size_t pwlen,
+                           const unsigned char *salt, size_t saltlen,
+                           int iters, unsigned char *out, size_t outlen) {
+  if (out == NULL) return CNX_ERR_NULL;
+  if (cnx_fix_null(&pw, pwlen) != CNX_OK) return CNX_ERR_NULL;
+  if (cnx_fix_null(&salt, saltlen) != CNX_OK) return CNX_ERR_NULL;
+  if (pwlen > INT_MAX || saltlen > INT_MAX) return CNX_ERR_BADLEN;
+  if (outlen == 0 || outlen > INT_MAX) return CNX_ERR_BADLEN;
+  if (iters < 1) return CNX_ERR_RANGE;
+  pbkdf2_hmac_sha512(pw, (int)pwlen, salt, (int)saltlen, (uint32_t)iters, out,
+                     (int)outlen);
+  return CNX_OK;
+}
+
+/* ---- secp256k1 (phase 2) ----------------------------------------------------
+ * The curve is fixed: CoinXT exposes secp256k1 only (both chains use it), so
+ * no curve parameter crosses the ABI. Upstream's return conventions are
+ * inconsistent (sign/verify/recover/ecdh return 0 on success; read/uncompress
+ * return 1 on success); everything is normalized here to the cnx_ codes so the
+ * LCB layer sees exactly one convention.
+ *
+ * Signatures are 64 bytes r||s, big-endian, and are ALWAYS low-s: upstream
+ * canonicalizes s > n/2 to n - s inside ecdsa_sign_digest (BIP-62; what
+ * EIP-2 requires). Verification keeps upstream semantics: any mathematically
+ * valid signature verifies, including a high-s one from another producer;
+ * malformed r/s (zero or >= n) fail closed as CNX_ERR_BADSIG.
+ *
+ * A recoverable signature is 65 bytes r||s||recid with recid the RAW 0..3
+ * recovery id (bit 0: R.y parity, bit 1: R.x overflowed the order). Mapping
+ * to Ethereum's v (27/28, or EIP-155) is presentation and stays in script. */
+
+/* A valid seckey is a scalar in [1, n-1] (upstream's own validity rule, the
+ * same check tc_ecdsa_get_public_key33 performs before using a key). */
+int cnx_seckey_verify(const unsigned char *sk32) {
+  bignum256 k;
+  int valid = 0;
+  if (sk32 == NULL) return CNX_ERR_NULL;
+  bn_read_be(sk32, &k);
+  valid = !bn_is_zero(&k) && bn_is_less(&k, &secp256k1.order);
+  memzero(&k, sizeof(k));
+  return valid ? CNX_OK : CNX_ERR_BADKEY;
+}
+
+/* compressed != 0 writes 33 bytes (02/03||x) into out; 0 writes 65 bytes
+ * (04||x||y). The LCB layer sizes out via cnx_pubkey_len_*(). */
+int cnx_pubkey_from_seckey(const unsigned char *sk32, int compressed,
+                           unsigned char *out) {
+  int rc = 0;
+  if (sk32 == NULL || out == NULL) return CNX_ERR_NULL;
+  if (compressed)
+    rc = ecdsa_get_public_key33(&secp256k1, sk32, out);
+  else
+    rc = ecdsa_get_public_key65(&secp256k1, sk32, out);
+  return rc == 0 ? CNX_OK : CNX_ERR_BADKEY;
+}
+
+/* Accepts a 33-byte compressed (02/03) or 65-byte uncompressed (04) pubkey;
+ * writes the 65-byte uncompressed form. The prefix byte must match publen so
+ * a truncated buffer can never be over-read. */
+int cnx_pubkey_decompress(const unsigned char *pub, size_t publen,
+                          unsigned char *out65) {
+  if (pub == NULL || out65 == NULL) return CNX_ERR_NULL;
+  if (publen == 33) {
+    if (pub[0] != 0x02 && pub[0] != 0x03) return CNX_ERR_BADKEY;
+  } else if (publen == 65) {
+    if (pub[0] != 0x04) return CNX_ERR_BADKEY;
+  } else {
+    return CNX_ERR_BADLEN;
+  }
+  if (ecdsa_uncompress_pubkey(&secp256k1, pub, out65) != 1)
+    return CNX_ERR_BADKEY;
+  return CNX_OK;
+}
+
+/* Deterministic ECDSA (RFC 6979) over the caller's 32-byte digest. CoinXT
+ * never builds the digest: sign exactly what the app constructed (SPEC.md
+ * section 8 rule 5). out_sig64 = r||s, always low-s. */
+int cnx_ecdsa_sign(const unsigned char *sk32, const unsigned char *hash32,
+                   unsigned char *out_sig64) {
+  int rc = 0;
+  if (sk32 == NULL || hash32 == NULL || out_sig64 == NULL) return CNX_ERR_NULL;
+  if (cnx_seckey_verify(sk32) != CNX_OK) return CNX_ERR_BADKEY;
+  rc = ecdsa_sign_digest(&secp256k1, sk32, hash32, out_sig64, NULL, NULL);
+  /* the key was pre-validated, so a failure here is upstream's retry loop
+   * exhausting (probability ~2^-256 per RFC 6979) or a real bug: loud code */
+  return rc == 0 ? CNX_OK : CNX_ERR_INTERNAL;
+}
+
+int cnx_ecdsa_verify(const unsigned char *pub, size_t publen,
+                     const unsigned char *hash32,
+                     const unsigned char *sig64) {
+  int rc = 0;
+  if (pub == NULL || hash32 == NULL || sig64 == NULL) return CNX_ERR_NULL;
+  if (publen == 33) {
+    if (pub[0] != 0x02 && pub[0] != 0x03) return CNX_ERR_BADKEY;
+  } else if (publen == 65) {
+    if (pub[0] != 0x04) return CNX_ERR_BADKEY;
+  } else {
+    return CNX_ERR_BADLEN;
+  }
+  rc = ecdsa_verify_digest(&secp256k1, pub, sig64, hash32);
+  if (rc == 0) return CNX_OK;
+  /* upstream: 1 = pubkey rejected; 2..5 = r/s out of range or no match */
+  return rc == 1 ? CNX_ERR_BADKEY : CNX_ERR_BADSIG;
+}
+
+/* Recoverable variant for Ethereum: out_sig65 = r||s||recid (raw 0..3). */
+int cnx_ecdsa_sign_recoverable(const unsigned char *sk32,
+                               const unsigned char *hash32,
+                               unsigned char *out_sig65) {
+  int rc = 0;
+  uint8_t recid = 0;
+  if (sk32 == NULL || hash32 == NULL || out_sig65 == NULL) return CNX_ERR_NULL;
+  if (cnx_seckey_verify(sk32) != CNX_OK) return CNX_ERR_BADKEY;
+  rc = ecdsa_sign_digest(&secp256k1, sk32, hash32, out_sig65, &recid, NULL);
+  if (rc != 0) return CNX_ERR_INTERNAL;
+  out_sig65[64] = recid;
+  return CNX_OK;
+}
+
+/* ecrecover: sig65 = r||s||recid (raw 0..3; the script layer strips any
+ * 27/EIP-155 offset first). Writes the 65-byte uncompressed signer pubkey. */
+int cnx_ecdsa_recover(const unsigned char *sig65, const unsigned char *hash32,
+                      unsigned char *out_pub65) {
+  if (sig65 == NULL || hash32 == NULL || out_pub65 == NULL) return CNX_ERR_NULL;
+  if (sig65[64] > 3) return CNX_ERR_BADSIG;
+  if (ecdsa_recover_pub_from_sig(&secp256k1, out_pub65, sig65, hash32,
+                                 (int)sig65[64]) != 0)
+    return CNX_ERR_BADSIG;
+  return CNX_OK;
+}
+
+/* ECDH: out32 is the raw SEC1 shared secret, the big-endian X coordinate of
+ * sk * P (no hash, no KDF), so it cross-checks 1:1 against any standard
+ * library; a protocol that wants a derived key hashes it in script. The full
+ * 65-byte shared point is a secret intermediate and is wiped here. */
+int cnx_ecdh(const unsigned char *sk32, const unsigned char *pub,
+             size_t publen, unsigned char *out32) {
+  uint8_t session[65];
+  int rc = 0;
+  size_t i = 0;
+  if (sk32 == NULL || pub == NULL || out32 == NULL) return CNX_ERR_NULL;
+  if (cnx_seckey_verify(sk32) != CNX_OK) return CNX_ERR_BADKEY;
+  if (publen == 33) {
+    if (pub[0] != 0x02 && pub[0] != 0x03) return CNX_ERR_BADKEY;
+  } else if (publen == 65) {
+    if (pub[0] != 0x04) return CNX_ERR_BADKEY;
+  } else {
+    return CNX_ERR_BADLEN;
+  }
+  rc = ecdh_multiply(&secp256k1, sk32, pub, session);
+  if (rc != 0) {
+    memzero(session, sizeof(session));
+    return CNX_ERR_BADKEY;
+  }
+  for (i = 0; i < 32; i++) out32[i] = session[1 + i];
+  memzero(session, sizeof(session));
   return CNX_OK;
 }

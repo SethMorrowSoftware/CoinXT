@@ -65,8 +65,9 @@ CoinXT C shim (cnx_)   native/coinxt.c  +  vendored trezor-crypto subset
    script layer clears its own key variables the moment it is done, and the docs state the honest limit
    (OXT script variables are not locked memory).
 6. **Deterministic by design.** RFC 6979 signing needs no randomness; fresh key material comes from the
-   caller (compose SodiumXT `sxRandomBytes`). No ambient RNG in the shim. Every operation is a pure
-   function of its inputs, so every operation is KAT-testable.
+   caller (compose SodiumXT `sxRandomBytes`). No output-affecting RNG in the shim (the OS CSPRNG feeds
+   only upstream's internal side-channel blinding; see "Determinism and entropy"). Every operation is a
+   pure function of its inputs, so every operation is KAT-testable.
 
 ## Commands
 
@@ -143,9 +144,15 @@ The single most expensive thing the family has learned. Change nothing here with
 
 ## Determinism and entropy
 
-- **No RNG in the shim.** trezor-crypto requires an integrator `random_buffer` / `random32`; wire it to
-  ABORT (nothing should call it once signing is RFC 6979 and keys come from the caller). A called RNG is
-  then a loud bug, not a silent weak key.
+- **No output-affecting RNG in the shim.** trezor-crypto requires an integrator `random_buffer` /
+  `random32`. The phase-0 plan was to wire it to ABORT ("nothing should call it once signing is
+  RFC 6979"), but that assumption is FALSE at the vendored commit: `ecdsa.c` calls `random32()` on
+  EVERY curve operation for side-channel blinding (`curve_to_jacobian` randomizes the Jacobian z
+  coordinate; the signing path additionally splits the nonce with a random scalar), so an abort would
+  break every call and a weak stub would silently defeat upstream's hardening. It is therefore wired to
+  the OS CSPRNG (`getrandom` / `arc4random_buf` / `BCryptGenRandom`), used ONLY for that internal
+  blinding: no output depends on it (every result stays KAT-pinned) and no key material ever comes from
+  it. It aborts loudly if the OS cannot supply entropy rather than continue with weakened blinding.
 - **Fresh key material is the caller's.** `cxNewSeckey(pEntropy32)` validates 32 caller-supplied bytes
   (from SodiumXT `sxRandomBytes`, or OS entropy). Seeds and mnemonics are deterministic from there.
 - Because everything is a pure function of its inputs, the whole surface is pinned by `tools/coin-kat.py`.
@@ -247,7 +254,7 @@ verify in an independent library.
 
 **Repo-prep - self-contained for the split (2026-07-07).** CoinXT no longer reaches outside its own
 directory for anything; it is ready to become the root of its own repository (the procedure and the
-post-split checklist are in [MIGRATION.md](MIGRATION.md)):
+post-split checklist were in MIGRATION.md, deleted once the move completed):
 
 - The static gates (`tools/check-livecodescript.py`, `tools/check-docs-style.py`) are carried verbatim
   into `tools/`, alongside `tools/coin-kat.py`. Every `../` reference in the docs was retargeted.
@@ -258,7 +265,62 @@ post-split checklist are in [MIGRATION.md](MIGRATION.md)):
   pattern; keep appending to the living-gotcha log.
 - CI ships at `.github/workflows/ci.yml`: both static gates, the vendored-source `MANIFEST.sha256`
   check, `coin-kat.py --check` (builds the shim from source, drives it via ctypes), and the ASan/UBSan
-  self-test. It is dormant while CoinXT is nested (GitHub reads only the repo root's `.github/`) and
-  goes live on the split.
+  self-test. It was dormant while CoinXT was nested (GitHub reads only the repo root's `.github/`) and
+  went live on the split.
 - `native/MANIFEST.sha256` pins every vendored trezor-crypto file now, ahead of the packaging phase
   (release binaries join it there). Refresh it in the same change as any vendor re-pin.
+
+**Split complete; phases 1-2 native DONE and externally verified; script layer written (2026-07-08).**
+CoinXT is now its own repository. The post-split checklist ran in this change: the CI workflow moved to
+`.github/workflows/ci.yml` (the upload had dropped the leading dot, leaving CI dormant), MIGRATION.md
+and the README staging paragraph were removed. Still the owner's call: a top-level project LICENSE (the
+MIT file in `native/vendor/` covers only the vendored code) and protecting `main`.
+
+- Vendored the full phase-1/2 trezor-crypto subset at the SAME pinned commit `230cfe3...` (sha2,
+  ripemd160, hmac, pbkdf2, bignum, ecdsa, secp256k1, curves, rfc6979, hmac_drbg, plus ecdsa.c's
+  link-time deps hasher/address/base58/blake256/blake2b/groestl and the header-only bip32.h /
+  ed25519-donna/ed25519.h that secp256k1.h's `curve_info` needs; see VENDOR.md). The fetch pipeline was
+  verified by re-fetching `sha3.c` and diffing byte-identical against the already-pinned copy.
+  `secp256k1.table` is NOT needed (options.h sets `USE_PRECOMPUTED_CP 0`); the zkp/secp256k1-zkp path
+  is compiled out (`USE_SECP256K1_ZKP_ECDSA` undefined).
+- **Upstream quirk, the big one:** the phase-0 "wire the RNG to abort" plan was WRONG for this commit;
+  `ecdsa.c` calls `random32()` on every curve op for side-channel blinding. Decision recorded in
+  "Determinism and entropy" (and VENDOR.md): `random_buffer` is implemented in the shim over the OS
+  CSPRNG, blinding-only, outputs stay KAT-pinned deterministic, loud abort on entropy failure.
+- **Upstream quirk, conventions:** upstream return conventions are mixed (`ecdsa_sign_digest` /
+  `_verify_digest` / `_recover_pub_from_sig` / `ecdh_multiply` return 0 on success; `ecdsa_read_pubkey`
+  / `_uncompress_pubkey` return 1 on success; `_verify_digest` uses 1 for a bad pubkey and 2..5 for bad
+  signatures). The shim normalizes ALL of it to the cnx_ codes. Upstream `ecdsa_sign_digest` enforces
+  low-s itself (`s > n/2` is negated, recovery bit flipped), so cnx_ signatures are always canonical.
+- `native/coinxt.c` now exports the full phase-1 hash/KDF surface (`cnx_sha256/512`, `cnx_ripemd160`,
+  `cnx_hmac_sha256/512`, `cnx_pbkdf2_hmac_sha512`), the phase-2 curve surface (`cnx_seckey_verify`,
+  `cnx_pubkey_from_seckey`, `cnx_pubkey_decompress`, `cnx_ecdsa_sign` / `_verify`,
+  `cnx_ecdsa_sign_recoverable` / `_recover`, `cnx_ecdh` = raw SEC1 x-coordinate), `cnx_wipe` (the LCB
+  layer's pre-deallocate secret scrub, added to SPEC 5.1), and the matching length functions.
+  **ABI is 2**; recoverable signatures carry the RAW recid 0..3 (Ethereum's 27/EIP-155 offset is
+  script-side presentation). Verification keeps upstream semantics (a mathematically valid high-s
+  signature from another producer verifies; malformed r/s fail closed); everything CoinXT PRODUCES is
+  low-s.
+- Verified headless: ASan/UBSan self-test walks every export clean; `tools/coin-kat.py` pins the classic
+  public RFC 6979 secp256k1 vectors (r, s, low-s, determinism), ecrecover round-trip (wrong recid
+  rejected), seckey range edges (0, n, n-1, 2^256-1), ECDH symmetry, and the hash/HMAC/PBKDF2 surface
+  against hashlib/hmac. **VERIFY promoted to fact:** CoinXT signatures verify in python-ecdsa (0.19.2),
+  python-ecdsa's RFC 6979 signatures match CoinXT's after low-s normalization, pubkeys and the ECDH
+  x-coordinate agree byte for byte, and python-ecdsa signatures verify in CoinXT. CI installs `ecdsa`
+  so the external cross-check runs on every push.
+- `src/coinxt.lcb` (the FFI seam; `cxb*` public handlers, all marshalling, all length checks, cnx_ code
+  to "CoinXT: ..." throw mapping, `cxbCheckABI`) and `src/coinxt.livecodescript` (the public `cx*` API
+  with the fail-closed string/boolean contract and the key-variable clearing) are written and pass the
+  static gate. Honest status: **designed and statically reasoned; NEEDS AN ON-ENGINE PASS.** Confirm
+  on-engine and record here: (a) the binds-to library element `"c:coinxt>..."` resolves to the shipped
+  libcoinxt binary per platform; (b) whether `MCDataGetBytePtr` of an empty Data surfaces as `nothing`
+  (the `cnxDataPtr` sentinel path); (c) that returning a non-nothing `optional Pointer` as `Pointer`
+  compiles (same helper).
+- Schnorr / BIP-340 is DEFERRED to a Taproot phase: this upstream commit provides it only through the
+  bundled secp256k1-zkp (a much larger vendoring surface). The phase-0 open question is hereby decided.
+- Local build outputs (`native/libcoinxt.*`) are gitignored; committed per-platform binaries arrive
+  deliberately in the packaging phase, pinned in `MANIFEST.sha256`.
+
+Next up: phase 3 (encodings and addresses, pure script, KAT-pinned) and the on-engine pass for the
+`.lcb` + `cx*` layer; then phase 4 (HD wallets + mnemonics; note bip32.c pulls the ed25519-donna
+subtree, so plan that vendoring deliberately).
