@@ -6,10 +6,6 @@ name: CoinXT CI
 # The NATIVE shim, by contrast, IS fully testable headless: the known-answer
 # harness builds it from source and drives it through ctypes, and the ASan/UBSan
 # self-test proves it memory-clean. Both run here on every push / PR.
-#
-# NOTE: while CoinXT is staged inside the OnionXT repository this workflow is
-# dormant (GitHub only reads .github/ at the repo root). It goes live the moment
-# CoinXT is split into its own repository (see MIGRATION.md).
 
 on:
   push:
@@ -34,6 +30,13 @@ jobs:
 
       - name: Vendored-source integrity (trezor-crypto subset)
         run: cd native && sha256sum -c MANIFEST.sha256
+
+      # python-ecdsa is the independent mainstream library the curve KATs
+      # cross-check against (the "verifies externally" done-bar). The harness
+      # skips those sections cleanly if the install ever fails; installing it
+      # here makes CI run them for real.
+      - name: Install the independent signature cross-check library
+        run: python3 -m pip install ecdsa
 
       - name: Known-answer vectors (build the shim, drive it via ctypes)
         run: python3 tools/coin-kat.py --check

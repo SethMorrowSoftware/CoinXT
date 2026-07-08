@@ -90,9 +90,15 @@ it internally:
   `sxRandomBytes`** (compose it), exactly as OnionXT derives onion keys from a SodiumXT seed. An app
   without SodiumXT passes OS entropy it obtained itself.
 
-This means: no ambient RNG in the shim to get wrong, no non-reproducible outputs, and the whole surface
-is pinned by vectors in `tools/coin-kat.py`. It also keeps the trust story honest: CoinXT never invents
-the randomness your keys depend on; you hand it in and can audit where it came from.
+This means: no output-affecting RNG in the shim to get wrong, no non-reproducible outputs, and the whole
+surface is pinned by vectors in `tools/coin-kat.py`. It also keeps the trust story honest: CoinXT never
+invents the randomness your keys depend on; you hand it in and can audit where it came from.
+
+One as-built caveat (see [CLAUDE.md](CLAUDE.md), "Determinism and entropy"): trezor-crypto itself calls
+its integrator RNG hook on every curve operation for SIDE-CHANNEL BLINDING (randomized Jacobian
+coordinates, nonce splitting). CoinXT feeds that hook from the OS CSPRNG. That randomness never reaches
+an output, so determinism holds exactly as stated; it only randomizes the internal compute path, and no
+key material ever comes from it.
 
 ## 5. The C ABI contract (`cnx_`)
 
@@ -158,6 +164,10 @@ HD (BIP-32) - the node is a fixed-size opaque byte blob (version||depth||fingerp
 Mnemonic (BIP-39):
   cnx_bip39_seed(mnemonic, mlen, passphrase, plen, out64) -> int    // PBKDF2-HMAC-SHA512, 2048 iters
   // entropy<->words and the checksum word live in script (pure bytes + a SHA-256 call)
+
+Hygiene:
+  cnx_wipe(buf, len) -> int      // memzero an engine-allocated out-buffer that carried a
+                                 // secret, BEFORE the LCB layer deallocates it
 ```
 
 That is the entire native surface: roughly 25 functions, all buffer-in / buffer-out, all deterministic.

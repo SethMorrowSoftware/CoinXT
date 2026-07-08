@@ -4,12 +4,15 @@ The phased build order for CoinXT (see [SPEC.md](SPEC.md) for WHAT, [CLAUDE.md](
 rules). Each phase has a concrete "done when" bar and states the risk it retires. Build in order: the
 native seam and the KAT harness come first, because everything downstream trusts them.
 
-> Status: **phase 0 done; phase 1 hash slice done and verified** (see the as-built notes in
-> [CLAUDE.md](CLAUDE.md)): the vendored SHA-3 unit, the `cnx_` shim with `cnx_keccak256` /
-> `cnx_sha3_256`, the ASan + UBSan self-test, and the headless KAT harness are in and green. The
-> `.lcb` on-engine binding and everything from the curve surface on are still to build. Unlike OnionXT
-> (pure script), CoinXT HAS a C shim, so the FFI/C-ABI section of CLAUDE.md is law from phase 1 onward,
-> and every shim change builds under ASan + UBSan and bumps the ABI + `cxCheckABI()` on any ABI change.
+> Status: **phase 0 done; phases 1-2 native DONE and externally verified; the `.lcb` + `cx*` script
+> layer is written and statically gated but NEEDS AN ON-ENGINE PASS** (see the as-built notes in
+> [CLAUDE.md](CLAUDE.md)). The shim (ABI 2) exports the full hash/KDF surface and the secp256k1 curve
+> surface; the KAT harness pins the classic RFC 6979 vectors and cross-checks signatures, pubkeys, and
+> ECDH against python-ecdsa in both directions (the "verifies in an independent library" bar, met
+> headless). Schnorr / BIP-340 is deferred to a Taproot phase (upstream provides it only via
+> secp256k1-zkp). Unlike OnionXT (pure script), CoinXT HAS a C shim, so the FFI/C-ABI section of
+> CLAUDE.md is law, and every shim change builds under ASan + UBSan and bumps the ABI + `cxCheckABI()`
+> on any ABI change. Next: phase 3 (encodings/addresses in script) and the on-engine pass.
 
 ## The "done" bar (applies to every phase)
 

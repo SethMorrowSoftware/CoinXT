@@ -50,20 +50,19 @@ CoinXT/
   SPEC.md                   what CoinXT is: the C/script split, the ABI contract, formats, security model
   IMPLEMENTATION-PLAN.md    the phased build order
   CLAUDE.md                 the operational guide + the FFI/C-ABI law (read before touching the shim)
-  MIGRATION.md              how to split CoinXT into its own repository (delete after the move)
   templates/
     CLAUDE.md               the portable xTalk/LiveCode/LCB lesson book (ALL the family's generic
                             engine lessons; copy it to the root of any NEW xTalk project)
-  .github/workflows/ci.yml  the gates in CI (dormant until CoinXT is a repository root)
+  .github/workflows/ci.yml  the gates in CI, run on every push / PR
   native/
     coinxt.c                the C shim (cnx_ ABI over the vendored crypto)
     build.sh                builds the shared library, and the ASan + UBSan self-test
     MANIFEST.sha256         integrity pins: the vendored sources now; release binaries and the
                             wordlist join in later phases
     vendor/                 the vendored trezor-crypto subset (MIT) + VENDOR.md + LICENSE
-  src/                      (lands with the on-engine binding step)
-    coinxt.lcb              the foreign-handler module (binds to cnx_*)
-    coinxt.livecodescript   the public cx* API + the script-side encodings
+  src/
+    coinxt.lcb              the foreign-handler module (binds to cnx_*; needs an on-engine pass)
+    coinxt.livecodescript   the public cx* API (script-side encodings land in phase 3)
   tools/
     coin-kat.py             known-answer vectors (builds the shim headless, drives it via ctypes)
     check-livecodescript.py the static gate for .lcb / .livecodescript (carried verbatim)
@@ -89,12 +88,18 @@ status until then is "designed and statically reasoned" (see [CLAUDE.md](CLAUDE.
 
 ## Status
 
-**Design done; phase 1 underway.** The native seam is proven: the shim (`native/coinxt.c`) over the
-vendored trezor-crypto SHA-3 unit builds under ASan + UBSan, exposes `cnx_keccak256` / `cnx_sha3_256`
-(the Ethereum-vs-NIST footgun handled), and passes known-answer vectors headless via
-`tools/coin-kat.py` (Keccak against published vectors, SHA3 against Python `hashlib`). That retires the
-FFI/build pipeline, the family's most expensive area. Next: the secp256k1 curve surface (phase 2), then
-encodings/addresses, HD wallets, and the `.lcb` on-engine binding.
+**Phases 1-2 native done and externally verified; the script layer awaits its on-engine pass.** The
+shim (`native/coinxt.c`, ABI 2) over the vendored trezor-crypto subset builds under ASan + UBSan and
+exposes the full hash/KDF surface (SHA-256/512, SHA3-256, Keccak-256, RIPEMD-160, HMAC,
+PBKDF2-HMAC-SHA512) and the secp256k1 curve surface (keypair, deterministic RFC 6979 ECDSA - always
+low-s, recoverable signatures + `ecrecover`, ECDH). `tools/coin-kat.py` pins it all headless: the
+classic public RFC 6979 vectors, the seckey range edges, the ecrecover round trip, and - the bar that
+matters for a money library - CoinXT signatures VERIFY in the independent python-ecdsa library and
+match its outputs byte for byte, in both directions. The `.lcb` foreign module and the public `cx*`
+script API are written and pass the static gates; there is no headless OXT compiler, so their honest
+status is "designed and statically reasoned; needs an on-engine pass". Next: encodings/addresses
+(phase 3, pure script), then HD wallets and mnemonics (phase 4). Schnorr / BIP-340 is deferred to a
+Taproot phase (upstream provides it only through secp256k1-zkp).
 
 [SPEC.md](SPEC.md), [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md), and [CLAUDE.md](CLAUDE.md) are the
 design and the running as-built log. Every deterministic path is pinned to a public known-answer vector,
@@ -103,9 +108,7 @@ library, not just in CoinXT.
 
 CoinXT is an independent library: it does not depend on OnionXT (the two compose at the documentation
 level only), and everything it needs (the static gates, the CI workflow, the portable engine-lesson
-book, the vendored sources and their manifest) lives inside this directory. It is currently staged
-inside the OnionXT repository and is ready to be split into its own repository; the exact procedure and
-the post-split checklist are in [MIGRATION.md](MIGRATION.md). (Remove this paragraph after the move.)
+book, the vendored sources and their manifest) lives in this repository.
 
 ## A note on handling money
 

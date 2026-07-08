@@ -6,18 +6,50 @@ These files are copied verbatim (no local patches) from **trezor-firmware**, dir
 - License: **MIT** (see `LICENSE` in this directory)
 - Pinned commit: `230cfe37e4c5fefb6ca117725d261a7b3646a995` (branch `main`, fetched 2026-07-02)
 
-## Files (phase 1: the hash unit)
+## Files (phases 1-2: hashes, KDFs, and the secp256k1 curve)
 
 | file | purpose |
 |---|---|
 | `sha3.h` / `sha3.c` | Keccak-256 (Ethereum, 0x01 padding) and SHA3-256 (NIST FIPS-202, 0x06) |
+| `sha2.h` / `sha2.c` | SHA-256 and SHA-512 |
+| `ripemd160.h` / `ripemd160.c` | RIPEMD-160 (Bitcoin hash160) |
+| `hmac.h` / `hmac.c` | HMAC-SHA256 / HMAC-SHA512 |
+| `pbkdf2.h` / `pbkdf2.c` | PBKDF2-HMAC-SHA256/512 (BIP-39 seed derivation) |
+| `bignum.h` / `bignum.c` | the 256-bit bignum the curve math runs on |
+| `ecdsa.h` / `ecdsa.c` | ECDSA sign/verify/recover, pubkey derivation, ECDH |
+| `secp256k1.h` / `secp256k1.c` | the secp256k1 curve parameters |
+| `curves.h` / `curves.c` | curve name registry |
+| `rfc6979.h` / `rfc6979.c` | deterministic k (RFC 6979) |
+| `hmac_drbg.h` / `hmac_drbg.c` | the HMAC-DRBG rfc6979.c is built on |
+| `hasher.h` / `hasher.c` | the hash dispatcher `ecdsa.c` links against |
+| `blake256.*`, `blake2b.*`, `blake2_common.h`, `groestl.*`, `groestl_internal.h` | hash variants `hasher.c` dispatches to (link-time deps only; CoinXT never selects them) |
+| `address.h` / `address.c`, `base58.h` / `base58.c`, `script.h` | link-time deps of `ecdsa.c`'s address helpers (CoinXT builds addresses in script and does not call these) |
+| `rand.h` | declares `random_buffer` / `random32`; the implementation is CoinXT's (see below) |
+| `bip32.h`, `ed25519-donna/ed25519.h` | headers only: `secp256k1.h` needs bip32.h's `curve_info` type, and bip32.h in turn needs ed25519.h's typedefs. `bip32.c` and the ed25519-donna `.c` files come with phase 4 |
 | `memzero.h` / `memzero.c` | best-effort secret wiping used by the hash contexts |
 | `byte_order.h` | endianness macros used by `sha3.c` |
 | `options.h` | trezor-crypto compile-time config (USE_KECCAK=1, USE_RFC6979=1, ...) |
 
-Later phases add `secp256k1` + `ecdsa.c` + `bignum.c` (curve), `sha2.c` / `ripemd160.c` / `hmac.c` /
-`pbkdf2.c` (hashes/KDF), `bip32.c` / `bip39.c` (HD + mnemonic), and `base58.c` / `segwit_addr.c` if we
-decide to keep any encoding native rather than in script.
+Deliberately NOT vendored:
+
+- `secp256k1.table` (the precomputed curve-point table): `options.h` sets `USE_PRECOMPUTED_CP` to 0,
+  so `secp256k1.c` never includes it. If a future phase flips that flag for speed, vendor the table in
+  the same change.
+- `rand.c`: trezor-crypto requires an integrator-supplied `random_buffer`. CoinXT implements it in
+  `../coinxt.c` over the OS CSPRNG. NOTE the phase-0 assumption ("nothing should call the RNG once
+  signing is RFC 6979") turned out to be FALSE at this commit: `ecdsa.c` calls `random32()` on every
+  curve operation for side-channel blinding (the Jacobian z randomization in `curve_to_jacobian`, and
+  the scalar split in `tc_ecdsa_sign_digest`). That randomness never reaches an output (every result
+  stays a pure function of the inputs, pinned by the KATs); it only randomizes the internal compute
+  path, so wiring it to abort would have broken every call, and wiring it weakly would silently defeat
+  upstream's hardening.
+- the zkp / secp256k1-zkp files (`zkp_ecdsa.*`, `zkp_bip340.*`, `vendor/secp256k1-zkp`): only compiled
+  under `USE_SECP256K1_ZKP_ECDSA`, which CoinXT does not define. This also defers Schnorr / BIP-340
+  (upstream provides it only via secp256k1-zkp, a much larger vendoring surface) to a later Taproot
+  phase, per the phase-0 open question.
+
+Later phases add `bip32.c` / `bip39.c` (HD + mnemonic; note bip32.c pulls the ed25519-donna subtree)
+and the BIP-39 wordlist.
 
 ## Rules (CLAUDE.md)
 

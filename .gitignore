@@ -1,0 +1,5 @@
+# build outputs (committed release binaries arrive deliberately in the packaging
+# phase, pinned in native/MANIFEST.sha256; a stray local build never ships by accident)
+native/libcoinxt.so
+native/libcoinxt.dylib
+native/libcoinxt.dll
