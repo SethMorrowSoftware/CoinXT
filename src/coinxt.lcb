@@ -1,15 +1,21 @@
 /* coinxt.lcb - the CoinXT foreign-handler module (the FFI seam).
 
    This is the ONLY file that touches the C shim (native/coinxt.c, the cnx_
-   ABI over vendored trezor-crypto). It follows the family FFI law (CLAUDE.md):
+   ABI over vendored trezor-crypto). It follows the family FFI law (CLAUDE.md)
+   and mirrors, construct for construct, the conventions the SodiumXT binding
+   (src/sodium.lcb, VERIFIED ON-ENGINE) settled against a real OXT compile and
+   a crash audit:
 
    - byte buffers cross as Pointer + length. An LCB Data does NOT auto-bridge
-     to void*: an IN buffer passes MCDataGetBytePtr(theData) plus its length,
-     an OUT buffer is a raw engine MCMemoryAllocate block passed as a real
-     Pointer, copied back with MCDataCreateWithBytes and then deallocated.
+     to void*: an IN buffer passes MCDataGetBytePtr(theData) plus its
+     MCDataGetLength, an OUT buffer is a raw engine MCMemoryAllocate block
+     passed as a real Pointer, copied back with MCDataCreateWithBytes and then
+     deallocated.
    - MCMemoryAllocate's size is C size_t, so it marshals as UIntSize, NOT
-     CUInt. MCDataCreateWithBytes's count is the engine's uindex_t, which is
-     32-bit, so THAT one is CUInt, not UIntSize (the reverse trap).
+     CUInt. MCDataGetLength / MCDataCreateWithBytes use the engine's uindex_t,
+     which is 32-bit, so THOSE are CUInt (the reverse trap).
+   - the cnx_ ABI's own lengths are C size_t, so they marshal as UIntSize
+     (unlike SodiumXT's sxt_ ABI, whose lengths are C int -> CInt).
    - every foreign call is bracketed by unsafe ... end unsafe.
    - every cnx_ function returns an int status (0 ok, negative error); the
      mapping to a human-readable error is done ONCE here (cnxThrow) and every
@@ -20,83 +26,103 @@
      HERE before the call, because the C side reads exactly that many bytes
      and trusts this layer (the documented ABI contract).
 
-   Secret hygiene: an out-buffer that carried a secret (the ECDH shared
-   secret; HD seckeys in a later phase) is wiped via cnx_wipe BEFORE it is
-   deallocated (cnxTakeSecret). Inbound key Data is the caller's; the script
-   layer clears its own variables (see src/coinxt.livecodescript).
+   Secret hygiene: an out-buffer that carried a secret (a PBKDF2-derived key,
+   the ECDH shared secret; HD seckeys in a later phase) is wiped via cnx_wipe
+   BEFORE it is deallocated (cnxTakeSecret). Inbound key Data is the caller's;
+   the script layer clears its own variables (see src/coinxt.livecodescript).
 
-   NEEDS AN ON-ENGINE PASS (no headless OXT compiler exists). In particular
-   confirm on-engine: (a) the library element of the binds-to strings
-   ("coinxt") resolves to the shipped libcoinxt.so/.dylib/.dll on each
-   platform, adjust if the engine wants the full filename; (b) that
-   MCDataGetBytePtr of an EMPTY Data surfaces as nothing (the sentinel path
-   in cnxDataPtr exists for exactly that case). */
+   Library resolution: the native library ships bundled INSIDE the packaged
+   extension as src/code/<arch>-<platform>/coinxt.{so,dll,dylib} with the bare
+   token name (no "lib" prefix), so the engine resolves the "c:coinxt>..."
+   bind strings via the revLibraryMapping with no loose library and no
+   LD_LIBRARY_PATH (the SodiumXT / TorrentXT packaging model;
+   tools/package-extension.py stages it, CI refreshes it).
 
-library community.coinxt.binding
+   NEEDS AN ON-ENGINE PASS (no headless OXT compiler exists). One deliberate
+   divergence from the proven sodium.lcb to confirm on-engine: cnxDataPtr
+   never calls MCDataGetBytePtr on an EMPTY Data (length 0 substitutes a
+   1-byte module-lifetime sentinel), because the empty case's byte pointer is
+   engine-defined and the shim never reads a zero-length buffer anyway. */
+
+library org.openxtalk.library.coinxt
 
 use com.livecode.foreign
-use com.livecode.byte
 use com.livecode.string
+use com.livecode.arithmetic
+
+metadata version    is "0.1.0"
+metadata author     is "OpenXTalk"
+metadata title      is "CoinXT"
+metadata summary    is "Bitcoin and Ethereum cryptography for xTalk via trezor-crypto (secp256k1 keys, RFC 6979 ECDSA, recoverable signatures and ecrecover, ECDH, SHA-2/SHA-3/Keccak-256/RIPEMD-160, HMAC, PBKDF2)."
 
 /* the .lcb and the shim ship as one unit; any skew means a stale binary and
-   is caught by cxbCheckABI before a call could corrupt memory */
+   is caught by cxbCheckABI before a call could corrupt memory. Keep in step
+   with CNX_ABI_VERSION in native/coinxt.c. */
 constant kAbiVersion is 2
 
-/* ---- engine builtins (resolve by name; no leading underscore) ---- */
+/* --------------------------------------------------------------------------
+   Engine memory + Data bridges (resolve by NAME, so NO leading underscore).
+   -------------------------------------------------------------------------- */
 
-foreign handler MCMemoryAllocate(in pSize as UIntSize, out rBlock as Pointer) returns CBool binds to "<builtin>"
-foreign handler MCMemoryDeallocate(in pBlock as Pointer) returns nothing binds to "<builtin>"
-foreign handler MCDataGetBytePtr(in pData as Data) returns optional Pointer binds to "<builtin>"
-foreign handler MCDataCreateWithBytes(in pBytes as Pointer, in pCount as CUInt, out rData as Data) returns CBool binds to "<builtin>"
+foreign handler MCMemoryAllocate(in pSize as UIntSize, out rPtr as Pointer) returns CBool binds to "<builtin>"
+foreign handler MCMemoryDeallocate(in pPtr as Pointer) returns nothing binds to "<builtin>"
+foreign handler MCDataGetBytePtr(in pData as Data) returns Pointer binds to "<builtin>"
+foreign handler MCDataGetLength(in pData as Data) returns CUInt binds to "<builtin>"
+foreign handler MCDataCreateWithBytes(in pBytes as Pointer, in pLen as CUInt, out rData as Data) returns CBool binds to "<builtin>"
 
-/* ---- the cnx_ ABI (symbols are stable and never renamed once shipped) ---- */
+/* --------------------------------------------------------------------------
+   The cnx_ ABI (stable exported symbols, never renamed once shipped).
+   Private _cnx_* names here; the bind strings carry the real symbol.
+   -------------------------------------------------------------------------- */
 
-foreign handler CnxAbiVersion() returns CInt binds to "c:coinxt>cnx_abi_version"
+foreign handler _cnx_abi_version() returns CInt binds to "c:coinxt>cnx_abi_version"
 
-foreign handler CnxKeccak256Len() returns UIntSize binds to "c:coinxt>cnx_keccak256_len"
-foreign handler CnxSha3_256Len() returns UIntSize binds to "c:coinxt>cnx_sha3_256_len"
-foreign handler CnxSha256Len() returns UIntSize binds to "c:coinxt>cnx_sha256_len"
-foreign handler CnxSha512Len() returns UIntSize binds to "c:coinxt>cnx_sha512_len"
-foreign handler CnxRipemd160Len() returns UIntSize binds to "c:coinxt>cnx_ripemd160_len"
-foreign handler CnxHmacSha256Len() returns UIntSize binds to "c:coinxt>cnx_hmac_sha256_len"
-foreign handler CnxHmacSha512Len() returns UIntSize binds to "c:coinxt>cnx_hmac_sha512_len"
-foreign handler CnxSeckeyLen() returns UIntSize binds to "c:coinxt>cnx_seckey_len"
-foreign handler CnxPubkeyLenCompressed() returns UIntSize binds to "c:coinxt>cnx_pubkey_len_compressed"
-foreign handler CnxPubkeyLenUncompressed() returns UIntSize binds to "c:coinxt>cnx_pubkey_len_uncompressed"
-foreign handler CnxEcdsaSigLen() returns UIntSize binds to "c:coinxt>cnx_ecdsa_sig_len"
-foreign handler CnxRecoverableSigLen() returns UIntSize binds to "c:coinxt>cnx_recoverable_sig_len"
-foreign handler CnxDigestLen() returns UIntSize binds to "c:coinxt>cnx_digest_len"
-foreign handler CnxEcdhSecretLen() returns UIntSize binds to "c:coinxt>cnx_ecdh_secret_len"
+foreign handler _cnx_keccak256_len() returns UIntSize binds to "c:coinxt>cnx_keccak256_len"
+foreign handler _cnx_sha3_256_len() returns UIntSize binds to "c:coinxt>cnx_sha3_256_len"
+foreign handler _cnx_sha256_len() returns UIntSize binds to "c:coinxt>cnx_sha256_len"
+foreign handler _cnx_sha512_len() returns UIntSize binds to "c:coinxt>cnx_sha512_len"
+foreign handler _cnx_ripemd160_len() returns UIntSize binds to "c:coinxt>cnx_ripemd160_len"
+foreign handler _cnx_hmac_sha256_len() returns UIntSize binds to "c:coinxt>cnx_hmac_sha256_len"
+foreign handler _cnx_hmac_sha512_len() returns UIntSize binds to "c:coinxt>cnx_hmac_sha512_len"
+foreign handler _cnx_seckey_len() returns UIntSize binds to "c:coinxt>cnx_seckey_len"
+foreign handler _cnx_pubkey_len_compressed() returns UIntSize binds to "c:coinxt>cnx_pubkey_len_compressed"
+foreign handler _cnx_pubkey_len_uncompressed() returns UIntSize binds to "c:coinxt>cnx_pubkey_len_uncompressed"
+foreign handler _cnx_ecdsa_sig_len() returns UIntSize binds to "c:coinxt>cnx_ecdsa_sig_len"
+foreign handler _cnx_recoverable_sig_len() returns UIntSize binds to "c:coinxt>cnx_recoverable_sig_len"
+foreign handler _cnx_digest_len() returns UIntSize binds to "c:coinxt>cnx_digest_len"
+foreign handler _cnx_ecdh_secret_len() returns UIntSize binds to "c:coinxt>cnx_ecdh_secret_len"
 
-foreign handler CnxKeccak256(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_keccak256"
-foreign handler CnxSha3_256(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_sha3_256"
-foreign handler CnxSha256(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_sha256"
-foreign handler CnxSha512(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_sha512"
-foreign handler CnxRipemd160(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ripemd160"
-foreign handler CnxHmacSha256(in pKey as Pointer, in pKeyLen as UIntSize, in pMsg as Pointer, in pMsgLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hmac_sha256"
-foreign handler CnxHmacSha512(in pKey as Pointer, in pKeyLen as UIntSize, in pMsg as Pointer, in pMsgLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hmac_sha512"
-foreign handler CnxPbkdf2HmacSha512(in pPw as Pointer, in pPwLen as UIntSize, in pSalt as Pointer, in pSaltLen as UIntSize, in pIters as CInt, in pOut as Pointer, in pOutLen as UIntSize) returns CInt binds to "c:coinxt>cnx_pbkdf2_hmac_sha512"
+foreign handler _cnx_keccak256(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_keccak256"
+foreign handler _cnx_sha3_256(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_sha3_256"
+foreign handler _cnx_sha256(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_sha256"
+foreign handler _cnx_sha512(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_sha512"
+foreign handler _cnx_ripemd160(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ripemd160"
+foreign handler _cnx_hmac_sha256(in pKey as Pointer, in pKeyLen as UIntSize, in pMsg as Pointer, in pMsgLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hmac_sha256"
+foreign handler _cnx_hmac_sha512(in pKey as Pointer, in pKeyLen as UIntSize, in pMsg as Pointer, in pMsgLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hmac_sha512"
+foreign handler _cnx_pbkdf2_hmac_sha512(in pPw as Pointer, in pPwLen as UIntSize, in pSalt as Pointer, in pSaltLen as UIntSize, in pIters as CInt, in pOut as Pointer, in pOutLen as UIntSize) returns CInt binds to "c:coinxt>cnx_pbkdf2_hmac_sha512"
 
-foreign handler CnxSeckeyVerify(in pSk as Pointer) returns CInt binds to "c:coinxt>cnx_seckey_verify"
-foreign handler CnxPubkeyFromSeckey(in pSk as Pointer, in pCompressed as CInt, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_pubkey_from_seckey"
-foreign handler CnxPubkeyDecompress(in pPub as Pointer, in pPubLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_pubkey_decompress"
-foreign handler CnxEcdsaSign(in pSk as Pointer, in pHash as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdsa_sign"
-foreign handler CnxEcdsaVerify(in pPub as Pointer, in pPubLen as UIntSize, in pHash as Pointer, in pSig as Pointer) returns CInt binds to "c:coinxt>cnx_ecdsa_verify"
-foreign handler CnxEcdsaSignRecoverable(in pSk as Pointer, in pHash as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdsa_sign_recoverable"
-foreign handler CnxEcdsaRecover(in pSig as Pointer, in pHash as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdsa_recover"
-foreign handler CnxEcdh(in pSk as Pointer, in pPub as Pointer, in pPubLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdh"
-foreign handler CnxWipe(in pBuf as Pointer, in pLen as UIntSize) returns CInt binds to "c:coinxt>cnx_wipe"
+foreign handler _cnx_seckey_verify(in pSk as Pointer) returns CInt binds to "c:coinxt>cnx_seckey_verify"
+foreign handler _cnx_pubkey_from_seckey(in pSk as Pointer, in pCompressed as CInt, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_pubkey_from_seckey"
+foreign handler _cnx_pubkey_decompress(in pPub as Pointer, in pPubLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_pubkey_decompress"
+foreign handler _cnx_ecdsa_sign(in pSk as Pointer, in pHash as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdsa_sign"
+foreign handler _cnx_ecdsa_verify(in pPub as Pointer, in pPubLen as UIntSize, in pHash as Pointer, in pSig as Pointer) returns CInt binds to "c:coinxt>cnx_ecdsa_verify"
+foreign handler _cnx_ecdsa_sign_recoverable(in pSk as Pointer, in pHash as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdsa_sign_recoverable"
+foreign handler _cnx_ecdsa_recover(in pSig as Pointer, in pHash as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdsa_recover"
+foreign handler _cnx_ecdh(in pSk as Pointer, in pPub as Pointer, in pPubLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdh"
+foreign handler _cnx_wipe(in pBuf as Pointer, in pLen as UIntSize) returns CInt binds to "c:coinxt>cnx_wipe"
 
-/* a 1-byte module-lifetime block substituted when an empty Data surfaces a
-   null byte pointer (a plain Pointer in-parameter rejects nothing; the shim
-   never dereferences a zero-length buffer) */
+/* a 1-byte module-lifetime block substituted for the byte pointer of an EMPTY
+   Data (whose real byte pointer is engine-defined and may be null; a plain
+   Pointer rejects nothing, and the shim never reads a zero-length buffer) */
 variable sEmptySentinel as optional Pointer
 
-/* ---- private marshalling helpers ---- */
+/* --------------------------------------------------------------------------
+   Private marshalling helpers.
+   -------------------------------------------------------------------------- */
 
 /* map a cnx_ status code to one thrown "CoinXT: ..." string; pWhat names the
-   public operation so the app's catch shows where it failed */
-private handler cnxThrow(in pRc as Number, in pWhat as String) returns nothing
+   operation so the app's catch shows where it failed */
+private handler cnxThrow(in pRc as Integer, in pWhat as String) returns nothing
    if pRc is -1 then
       throw "CoinXT: " & pWhat & ": a required buffer was missing (engine-level bug)"
    else if pRc is -2 then
@@ -112,10 +138,53 @@ private handler cnxThrow(in pRc as Number, in pWhat as String) returns nothing
    end if
 end handler
 
+private handler cnxAlloc(in pCap as Integer) returns Pointer
+   variable tPtr as Pointer
+   variable tOk as CBool
+   unsafe
+      put MCMemoryAllocate(pCap, tPtr) into tOk
+   end unsafe
+   if not tOk then
+      throw "CoinXT: out of memory allocating an output buffer"
+   end if
+   return tPtr
+end handler
+
+private handler cnxFree(in pPtr as Pointer) returns nothing
+   unsafe
+      MCMemoryDeallocate(pPtr)
+   end unsafe
+end handler
+
+private handler cnxDataLen(in pData as Data) returns Integer
+   variable tLen as Integer
+   unsafe
+      put MCDataGetLength(pData) into tLen
+   end unsafe
+   return tLen
+end handler
+
+/* IN-buffer view of a Data value. An EMPTY Data never reaches
+   MCDataGetBytePtr at all: it gets the shared 1-byte sentinel instead, which
+   the shim never dereferences because the passed length is 0. */
+private handler cnxDataPtr(in pData as Data) returns Pointer
+   variable tPtr as Pointer
+   if cnxDataLen(pData) is 0 then
+      if sEmptySentinel is nothing then
+         put cnxAlloc(1) into sEmptySentinel
+      end if
+      return sEmptySentinel
+   end if
+   unsafe
+      put MCDataGetBytePtr(pData) into tPtr
+   end unsafe
+   return tPtr
+end handler
+
 /* the C side reads exactly the advertised byte count of every fixed-size
    argument, so a wrong-length Data must be stopped HERE, before the call */
-private handler cnxCheckLen(in pData as Data, in pWant as Number, in pWhat as String) returns nothing
-   if the number of bytes in pData is not pWant then
+private handler cnxCheckLen(in pData as Data, in pWant as Integer, in pWhat as String) returns nothing
+   if cnxDataLen(pData) is not pWant then
       throw "CoinXT: " & pWhat & ": wrong length"
    end if
 end handler
@@ -123,204 +192,181 @@ end handler
 /* a pubkey is 33 (02/03 compressed) or 65 (04 uncompressed) bytes; anything
    else fails closed here and the prefix/point checks fail closed in C */
 private handler cnxCheckPubLen(in pPub as Data, in pWhat as String) returns nothing
-   variable tLen as Number
-   variable tLen33 as Number
-   variable tLen65 as Number
-   put the number of bytes in pPub into tLen
+   variable tLen as Integer
+   variable tLen33 as Integer
+   variable tLen65 as Integer
+   put cnxDataLen(pPub) into tLen
    unsafe
-      put CnxPubkeyLenCompressed() into tLen33
-      put CnxPubkeyLenUncompressed() into tLen65
+      put _cnx_pubkey_len_compressed() into tLen33
+      put _cnx_pubkey_len_uncompressed() into tLen65
    end unsafe
    if tLen is not tLen33 and tLen is not tLen65 then
       throw "CoinXT: " & pWhat & ": a pubkey must be 33 or 65 bytes"
    end if
 end handler
 
-private handler cnxAlloc(in pLen as Number) returns Pointer
-   variable tPtr as Pointer
-   unsafe
-      if not MCMemoryAllocate(pLen, tPtr) then
-         throw "CoinXT: out of memory"
-      end if
-   end unsafe
-   return tPtr
-end handler
-
-/* IN-buffer view of a Data value. Empty Data may surface a null byte pointer,
-   which a Pointer parameter would reject; hand the shim a harmless 1-byte
-   sentinel instead (it never reads past the passed length of 0) */
-private handler cnxDataPtr(in pData as Data) returns Pointer
-   variable tPtr as optional Pointer
-   variable tBlock as Pointer
-   unsafe
-      put MCDataGetBytePtr(pData) into tPtr
-   end unsafe
-   if tPtr is not nothing then
-      return tPtr
-   end if
-   if sEmptySentinel is nothing then
-      put cnxAlloc(1) into tBlock
-      put tBlock into sEmptySentinel
-   end if
-   return sEmptySentinel
-end handler
-
 /* copy an out-block into a Data value and free the block (non-secret path) */
-private handler cnxTake(in pPtr as Pointer, in pLen as Number) returns Data
+private handler cnxTake(in pPtr as Pointer, in pLen as Integer) returns Data
    variable tData as Data
-   variable tOk as Boolean
+   variable tOk as CBool
    unsafe
       put MCDataCreateWithBytes(pPtr, pLen, tData) into tOk
       MCMemoryDeallocate(pPtr)
    end unsafe
    if not tOk then
-      throw "CoinXT: could not create a Data value (engine)"
+      throw "CoinXT: could not build result data"
    end if
    return tData
 end handler
 
 /* same, but the block carried a secret: wipe it BEFORE deallocation so the
    bytes do not linger in freed heap */
-private handler cnxTakeSecret(in pPtr as Pointer, in pLen as Number) returns Data
+private handler cnxTakeSecret(in pPtr as Pointer, in pLen as Integer) returns Data
    variable tData as Data
-   variable tOk as Boolean
+   variable tOk as CBool
    unsafe
       put MCDataCreateWithBytes(pPtr, pLen, tData) into tOk
-      CnxWipe(pPtr, pLen)
+      _cnx_wipe(pPtr, pLen)
       MCMemoryDeallocate(pPtr)
    end unsafe
    if not tOk then
-      throw "CoinXT: could not create a Data value (engine)"
+      throw "CoinXT: could not build result data"
    end if
    return tData
 end handler
 
 /* shared shape of every one-shot hash: in-Data, fixed-size out */
-private handler cnxHashCall(in pWhich as String, in pData as Data, in pOutLen as Number) returns Data
-   variable tRc as Number
+private handler cnxHashCall(in pWhich as String, in pData as Data, in pOutLen as Integer) returns Data
+   variable tRc as Integer
    variable tIn as Pointer
    variable tOut as Pointer
+   variable tInLen as Integer
    put cnxDataPtr(pData) into tIn
+   put cnxDataLen(pData) into tInLen
    put cnxAlloc(pOutLen) into tOut
    unsafe
       if pWhich is "keccak256" then
-         put CnxKeccak256(tIn, the number of bytes in pData, tOut) into tRc
+         put _cnx_keccak256(tIn, tInLen, tOut) into tRc
       else if pWhich is "sha3_256" then
-         put CnxSha3_256(tIn, the number of bytes in pData, tOut) into tRc
+         put _cnx_sha3_256(tIn, tInLen, tOut) into tRc
       else if pWhich is "sha256" then
-         put CnxSha256(tIn, the number of bytes in pData, tOut) into tRc
+         put _cnx_sha256(tIn, tInLen, tOut) into tRc
       else if pWhich is "sha512" then
-         put CnxSha512(tIn, the number of bytes in pData, tOut) into tRc
+         put _cnx_sha512(tIn, tInLen, tOut) into tRc
       else
-         put CnxRipemd160(tIn, the number of bytes in pData, tOut) into tRc
-      end if
-      if tRc is not 0 then
-         MCMemoryDeallocate(tOut)
+         put _cnx_ripemd160(tIn, tInLen, tOut) into tRc
       end if
    end unsafe
    if tRc is not 0 then
+      cnxFree(tOut)
       cnxThrow(tRc, pWhich)
    end if
    return cnxTake(tOut, pOutLen)
 end handler
 
-/* ---- public surface (the script layer's cx* wraps exactly these) ---- */
+/* --------------------------------------------------------------------------
+   Public surface (the script layer's cx* wraps exactly these).
+   -------------------------------------------------------------------------- */
 
 /* throws on ABI skew so a stale native binary is caught BEFORE any call that
    could corrupt memory; the app tells the user to reinstall CoinXT */
 public handler cxbCheckABI() returns nothing
-   variable tGot as Number
+   variable tGot as Integer
    unsafe
-      put CnxAbiVersion() into tGot
+      put _cnx_abi_version() into tGot
    end unsafe
    if tGot is not kAbiVersion then
-      throw "CoinXT: native shim ABI mismatch; reinstall CoinXT (script and binary versions differ)"
+      throw "CoinXT: native shim ABI mismatch; reinstall the packaged CoinXT extension (script and binary versions differ)"
    end if
 end handler
 
 public handler cxbKeccak256(in pData as Data) returns Data
-   variable tLen as Number
+   variable tLen as Integer
    unsafe
-      put CnxKeccak256Len() into tLen
+      put _cnx_keccak256_len() into tLen
    end unsafe
    return cnxHashCall("keccak256", pData, tLen)
 end handler
 
 public handler cxbSha3_256(in pData as Data) returns Data
-   variable tLen as Number
+   variable tLen as Integer
    unsafe
-      put CnxSha3_256Len() into tLen
+      put _cnx_sha3_256_len() into tLen
    end unsafe
    return cnxHashCall("sha3_256", pData, tLen)
 end handler
 
 public handler cxbSha256(in pData as Data) returns Data
-   variable tLen as Number
+   variable tLen as Integer
    unsafe
-      put CnxSha256Len() into tLen
+      put _cnx_sha256_len() into tLen
    end unsafe
    return cnxHashCall("sha256", pData, tLen)
 end handler
 
 public handler cxbSha512(in pData as Data) returns Data
-   variable tLen as Number
+   variable tLen as Integer
    unsafe
-      put CnxSha512Len() into tLen
+      put _cnx_sha512_len() into tLen
    end unsafe
    return cnxHashCall("sha512", pData, tLen)
 end handler
 
 public handler cxbRipemd160(in pData as Data) returns Data
-   variable tLen as Number
+   variable tLen as Integer
    unsafe
-      put CnxRipemd160Len() into tLen
+      put _cnx_ripemd160_len() into tLen
    end unsafe
    return cnxHashCall("ripemd160", pData, tLen)
 end handler
 
 public handler cxbHmacSha256(in pKey as Data, in pMsg as Data) returns Data
-   variable tRc as Number
-   variable tLen as Number
+   variable tRc as Integer
+   variable tLen as Integer
+   variable tKeyLen as Integer
+   variable tMsgLen as Integer
    variable tKeyPtr as Pointer
    variable tMsgPtr as Pointer
    variable tOut as Pointer
    put cnxDataPtr(pKey) into tKeyPtr
    put cnxDataPtr(pMsg) into tMsgPtr
+   put cnxDataLen(pKey) into tKeyLen
+   put cnxDataLen(pMsg) into tMsgLen
    unsafe
-      put CnxHmacSha256Len() into tLen
+      put _cnx_hmac_sha256_len() into tLen
    end unsafe
    put cnxAlloc(tLen) into tOut
    unsafe
-      put CnxHmacSha256(tKeyPtr, the number of bytes in pKey, tMsgPtr, the number of bytes in pMsg, tOut) into tRc
-      if tRc is not 0 then
-         MCMemoryDeallocate(tOut)
-      end if
+      put _cnx_hmac_sha256(tKeyPtr, tKeyLen, tMsgPtr, tMsgLen, tOut) into tRc
    end unsafe
    if tRc is not 0 then
+      cnxFree(tOut)
       cnxThrow(tRc, "hmac-sha256")
    end if
    return cnxTake(tOut, tLen)
 end handler
 
 public handler cxbHmacSha512(in pKey as Data, in pMsg as Data) returns Data
-   variable tRc as Number
-   variable tLen as Number
+   variable tRc as Integer
+   variable tLen as Integer
+   variable tKeyLen as Integer
+   variable tMsgLen as Integer
    variable tKeyPtr as Pointer
    variable tMsgPtr as Pointer
    variable tOut as Pointer
    put cnxDataPtr(pKey) into tKeyPtr
    put cnxDataPtr(pMsg) into tMsgPtr
+   put cnxDataLen(pKey) into tKeyLen
+   put cnxDataLen(pMsg) into tMsgLen
    unsafe
-      put CnxHmacSha512Len() into tLen
+      put _cnx_hmac_sha512_len() into tLen
    end unsafe
    put cnxAlloc(tLen) into tOut
    unsafe
-      put CnxHmacSha512(tKeyPtr, the number of bytes in pKey, tMsgPtr, the number of bytes in pMsg, tOut) into tRc
-      if tRc is not 0 then
-         MCMemoryDeallocate(tOut)
-      end if
+      put _cnx_hmac_sha512(tKeyPtr, tKeyLen, tMsgPtr, tMsgLen, tOut) into tRc
    end unsafe
    if tRc is not 0 then
+      cnxFree(tOut)
       cnxThrow(tRc, "hmac-sha512")
    end if
    return cnxTake(tOut, tLen)
@@ -328,8 +374,10 @@ end handler
 
 /* the derived key can carry key material (a BIP-39 seed), so the out-block
    takes the secret path */
-public handler cxbPbkdf2HmacSha512(in pPw as Data, in pSalt as Data, in pIters as Number, in pOutLen as Number) returns Data
-   variable tRc as Number
+public handler cxbPbkdf2HmacSha512(in pPw as Data, in pSalt as Data, in pIters as Integer, in pOutLen as Integer) returns Data
+   variable tRc as Integer
+   variable tPwLen as Integer
+   variable tSaltLen as Integer
    variable tPwPtr as Pointer
    variable tSaltPtr as Pointer
    variable tOut as Pointer
@@ -341,15 +389,17 @@ public handler cxbPbkdf2HmacSha512(in pPw as Data, in pSalt as Data, in pIters a
    end if
    put cnxDataPtr(pPw) into tPwPtr
    put cnxDataPtr(pSalt) into tSaltPtr
+   put cnxDataLen(pPw) into tPwLen
+   put cnxDataLen(pSalt) into tSaltLen
    put cnxAlloc(pOutLen) into tOut
    unsafe
-      put CnxPbkdf2HmacSha512(tPwPtr, the number of bytes in pPw, tSaltPtr, the number of bytes in pSalt, pIters, tOut, pOutLen) into tRc
+      put _cnx_pbkdf2_hmac_sha512(tPwPtr, tPwLen, tSaltPtr, tSaltLen, pIters, tOut, pOutLen) into tRc
       if tRc is not 0 then
-         CnxWipe(tOut, pOutLen)
-         MCMemoryDeallocate(tOut)
+         _cnx_wipe(tOut, pOutLen)
       end if
    end unsafe
    if tRc is not 0 then
+      cnxFree(tOut)
       cnxThrow(tRc, "pbkdf2")
    end if
    return cnxTakeSecret(tOut, pOutLen)
@@ -357,18 +407,18 @@ end handler
 
 /* true for a scalar in [1, n-1]; false otherwise (fail closed) */
 public handler cxbSeckeyVerify(in pSk as Data) returns Boolean
-   variable tRc as Number
+   variable tRc as Integer
    variable tSkPtr as Pointer
-   variable tLen as Number
+   variable tLen as Integer
    unsafe
-      put CnxSeckeyLen() into tLen
+      put _cnx_seckey_len() into tLen
    end unsafe
-   if the number of bytes in pSk is not tLen then
+   if cnxDataLen(pSk) is not tLen then
       return false
    end if
    put cnxDataPtr(pSk) into tSkPtr
    unsafe
-      put CnxSeckeyVerify(tSkPtr) into tRc
+      put _cnx_seckey_verify(tSkPtr) into tRc
    end unsafe
    if tRc is 0 then
       return true
@@ -377,18 +427,18 @@ public handler cxbSeckeyVerify(in pSk as Data) returns Boolean
 end handler
 
 public handler cxbPubkeyFromSeckey(in pSk as Data, in pCompressed as Boolean) returns Data
-   variable tRc as Number
+   variable tRc as Integer
    variable tSkPtr as Pointer
    variable tOut as Pointer
-   variable tOutLen as Number
-   variable tSkLen as Number
-   variable tFlag as Number
+   variable tOutLen as Integer
+   variable tSkLen as Integer
+   variable tFlag as Integer
    unsafe
-      put CnxSeckeyLen() into tSkLen
+      put _cnx_seckey_len() into tSkLen
       if pCompressed then
-         put CnxPubkeyLenCompressed() into tOutLen
+         put _cnx_pubkey_len_compressed() into tOutLen
       else
-         put CnxPubkeyLenUncompressed() into tOutLen
+         put _cnx_pubkey_len_uncompressed() into tOutLen
       end if
    end unsafe
    cnxCheckLen(pSk, tSkLen, "public key derivation")
@@ -399,35 +449,33 @@ public handler cxbPubkeyFromSeckey(in pSk as Data, in pCompressed as Boolean) re
    put cnxDataPtr(pSk) into tSkPtr
    put cnxAlloc(tOutLen) into tOut
    unsafe
-      put CnxPubkeyFromSeckey(tSkPtr, tFlag, tOut) into tRc
-      if tRc is not 0 then
-         MCMemoryDeallocate(tOut)
-      end if
+      put _cnx_pubkey_from_seckey(tSkPtr, tFlag, tOut) into tRc
    end unsafe
    if tRc is not 0 then
+      cnxFree(tOut)
       cnxThrow(tRc, "public key derivation")
    end if
    return cnxTake(tOut, tOutLen)
 end handler
 
 public handler cxbPubkeyDecompress(in pPub as Data) returns Data
-   variable tRc as Number
+   variable tRc as Integer
    variable tPubPtr as Pointer
+   variable tPubLen as Integer
    variable tOut as Pointer
-   variable tOutLen as Number
+   variable tOutLen as Integer
    cnxCheckPubLen(pPub, "pubkey decompress")
    unsafe
-      put CnxPubkeyLenUncompressed() into tOutLen
+      put _cnx_pubkey_len_uncompressed() into tOutLen
    end unsafe
    put cnxDataPtr(pPub) into tPubPtr
+   put cnxDataLen(pPub) into tPubLen
    put cnxAlloc(tOutLen) into tOut
    unsafe
-      put CnxPubkeyDecompress(tPubPtr, the number of bytes in pPub, tOut) into tRc
-      if tRc is not 0 then
-         MCMemoryDeallocate(tOut)
-      end if
+      put _cnx_pubkey_decompress(tPubPtr, tPubLen, tOut) into tRc
    end unsafe
    if tRc is not 0 then
+      cnxFree(tOut)
       cnxThrow(tRc, "pubkey decompress")
    end if
    return cnxTake(tOut, tOutLen)
@@ -436,17 +484,17 @@ end handler
 /* deterministic ECDSA (RFC 6979) over the caller's 32-byte digest; the
    result is 64 bytes r||s, always low-s */
 public handler cxbEcdsaSign(in pSk as Data, in pHash as Data) returns Data
-   variable tRc as Number
+   variable tRc as Integer
    variable tSkPtr as Pointer
    variable tHashPtr as Pointer
    variable tOut as Pointer
-   variable tOutLen as Number
-   variable tSkLen as Number
-   variable tHashLen as Number
+   variable tOutLen as Integer
+   variable tSkLen as Integer
+   variable tHashLen as Integer
    unsafe
-      put CnxSeckeyLen() into tSkLen
-      put CnxDigestLen() into tHashLen
-      put CnxEcdsaSigLen() into tOutLen
+      put _cnx_seckey_len() into tSkLen
+      put _cnx_digest_len() into tHashLen
+      put _cnx_ecdsa_sig_len() into tOutLen
    end unsafe
    cnxCheckLen(pSk, tSkLen, "sign")
    cnxCheckLen(pHash, tHashLen, "sign")
@@ -454,12 +502,10 @@ public handler cxbEcdsaSign(in pSk as Data, in pHash as Data) returns Data
    put cnxDataPtr(pHash) into tHashPtr
    put cnxAlloc(tOutLen) into tOut
    unsafe
-      put CnxEcdsaSign(tSkPtr, tHashPtr, tOut) into tRc
-      if tRc is not 0 then
-         MCMemoryDeallocate(tOut)
-      end if
+      put _cnx_ecdsa_sign(tSkPtr, tHashPtr, tOut) into tRc
    end unsafe
    if tRc is not 0 then
+      cnxFree(tOut)
       cnxThrow(tRc, "sign")
    end if
    return cnxTake(tOut, tOutLen)
@@ -468,34 +514,36 @@ end handler
 /* true only for a signature that verifies; every malformed input is false
    (fail closed), never an error the caller could mistake for success */
 public handler cxbEcdsaVerify(in pPub as Data, in pHash as Data, in pSig as Data) returns Boolean
-   variable tRc as Number
+   variable tRc as Integer
    variable tPubPtr as Pointer
    variable tHashPtr as Pointer
    variable tSigPtr as Pointer
-   variable tHashLen as Number
-   variable tSigLen as Number
-   variable tLen33 as Number
-   variable tLen65 as Number
+   variable tHashLen as Integer
+   variable tSigLen as Integer
+   variable tPubLen as Integer
+   variable tLen33 as Integer
+   variable tLen65 as Integer
    unsafe
-      put CnxDigestLen() into tHashLen
-      put CnxEcdsaSigLen() into tSigLen
-      put CnxPubkeyLenCompressed() into tLen33
-      put CnxPubkeyLenUncompressed() into tLen65
+      put _cnx_digest_len() into tHashLen
+      put _cnx_ecdsa_sig_len() into tSigLen
+      put _cnx_pubkey_len_compressed() into tLen33
+      put _cnx_pubkey_len_uncompressed() into tLen65
    end unsafe
-   if the number of bytes in pHash is not tHashLen then
+   if cnxDataLen(pHash) is not tHashLen then
       return false
    end if
-   if the number of bytes in pSig is not tSigLen then
+   if cnxDataLen(pSig) is not tSigLen then
       return false
    end if
-   if the number of bytes in pPub is not tLen33 and the number of bytes in pPub is not tLen65 then
+   put cnxDataLen(pPub) into tPubLen
+   if tPubLen is not tLen33 and tPubLen is not tLen65 then
       return false
    end if
    put cnxDataPtr(pPub) into tPubPtr
    put cnxDataPtr(pHash) into tHashPtr
    put cnxDataPtr(pSig) into tSigPtr
    unsafe
-      put CnxEcdsaVerify(tPubPtr, the number of bytes in pPub, tHashPtr, tSigPtr) into tRc
+      put _cnx_ecdsa_verify(tPubPtr, tPubLen, tHashPtr, tSigPtr) into tRc
    end unsafe
    if tRc is 0 then
       return true
@@ -506,17 +554,17 @@ end handler
 /* Ethereum's shape: 65 bytes r||s||recid with recid RAW 0..3 (mapping to
    v = 27/28 or EIP-155 is presentation and stays in the script layer) */
 public handler cxbEcdsaSignRecoverable(in pSk as Data, in pHash as Data) returns Data
-   variable tRc as Number
+   variable tRc as Integer
    variable tSkPtr as Pointer
    variable tHashPtr as Pointer
    variable tOut as Pointer
-   variable tOutLen as Number
-   variable tSkLen as Number
-   variable tHashLen as Number
+   variable tOutLen as Integer
+   variable tSkLen as Integer
+   variable tHashLen as Integer
    unsafe
-      put CnxSeckeyLen() into tSkLen
-      put CnxDigestLen() into tHashLen
-      put CnxRecoverableSigLen() into tOutLen
+      put _cnx_seckey_len() into tSkLen
+      put _cnx_digest_len() into tHashLen
+      put _cnx_recoverable_sig_len() into tOutLen
    end unsafe
    cnxCheckLen(pSk, tSkLen, "sign recoverable")
    cnxCheckLen(pHash, tHashLen, "sign recoverable")
@@ -524,12 +572,10 @@ public handler cxbEcdsaSignRecoverable(in pSk as Data, in pHash as Data) returns
    put cnxDataPtr(pHash) into tHashPtr
    put cnxAlloc(tOutLen) into tOut
    unsafe
-      put CnxEcdsaSignRecoverable(tSkPtr, tHashPtr, tOut) into tRc
-      if tRc is not 0 then
-         MCMemoryDeallocate(tOut)
-      end if
+      put _cnx_ecdsa_sign_recoverable(tSkPtr, tHashPtr, tOut) into tRc
    end unsafe
    if tRc is not 0 then
+      cnxFree(tOut)
       cnxThrow(tRc, "sign recoverable")
    end if
    return cnxTake(tOut, tOutLen)
@@ -538,17 +584,17 @@ end handler
 /* ecrecover: expects the RAW recid (0..3) in byte 65; returns the 65-byte
    uncompressed signer pubkey */
 public handler cxbEcdsaRecover(in pSig as Data, in pHash as Data) returns Data
-   variable tRc as Number
+   variable tRc as Integer
    variable tSigPtr as Pointer
    variable tHashPtr as Pointer
    variable tOut as Pointer
-   variable tOutLen as Number
-   variable tSigLen as Number
-   variable tHashLen as Number
+   variable tOutLen as Integer
+   variable tSigLen as Integer
+   variable tHashLen as Integer
    unsafe
-      put CnxRecoverableSigLen() into tSigLen
-      put CnxDigestLen() into tHashLen
-      put CnxPubkeyLenUncompressed() into tOutLen
+      put _cnx_recoverable_sig_len() into tSigLen
+      put _cnx_digest_len() into tHashLen
+      put _cnx_pubkey_len_uncompressed() into tOutLen
    end unsafe
    cnxCheckLen(pSig, tSigLen, "recover")
    cnxCheckLen(pHash, tHashLen, "recover")
@@ -556,12 +602,10 @@ public handler cxbEcdsaRecover(in pSig as Data, in pHash as Data) returns Data
    put cnxDataPtr(pHash) into tHashPtr
    put cnxAlloc(tOutLen) into tOut
    unsafe
-      put CnxEcdsaRecover(tSigPtr, tHashPtr, tOut) into tRc
-      if tRc is not 0 then
-         MCMemoryDeallocate(tOut)
-      end if
+      put _cnx_ecdsa_recover(tSigPtr, tHashPtr, tOut) into tRc
    end unsafe
    if tRc is not 0 then
+      cnxFree(tOut)
       cnxThrow(tRc, "recover")
    end if
    return cnxTake(tOut, tOutLen)
@@ -570,29 +614,31 @@ end handler
 /* raw SEC1 ECDH: the 32-byte X coordinate of sk * P (no KDF); the shared
    secret is a secret, so its out-block is wiped before deallocation */
 public handler cxbEcdh(in pSk as Data, in pPub as Data) returns Data
-   variable tRc as Number
+   variable tRc as Integer
    variable tSkPtr as Pointer
    variable tPubPtr as Pointer
    variable tOut as Pointer
-   variable tOutLen as Number
-   variable tSkLen as Number
+   variable tOutLen as Integer
+   variable tSkLen as Integer
+   variable tPubLen as Integer
    unsafe
-      put CnxSeckeyLen() into tSkLen
-      put CnxEcdhSecretLen() into tOutLen
+      put _cnx_seckey_len() into tSkLen
+      put _cnx_ecdh_secret_len() into tOutLen
    end unsafe
    cnxCheckLen(pSk, tSkLen, "ecdh")
    cnxCheckPubLen(pPub, "ecdh")
    put cnxDataPtr(pSk) into tSkPtr
    put cnxDataPtr(pPub) into tPubPtr
+   put cnxDataLen(pPub) into tPubLen
    put cnxAlloc(tOutLen) into tOut
    unsafe
-      put CnxEcdh(tSkPtr, tPubPtr, the number of bytes in pPub, tOut) into tRc
+      put _cnx_ecdh(tSkPtr, tPubPtr, tPubLen, tOut) into tRc
       if tRc is not 0 then
-         CnxWipe(tOut, tOutLen)
-         MCMemoryDeallocate(tOut)
+         _cnx_wipe(tOut, tOutLen)
       end if
    end unsafe
    if tRc is not 0 then
+      cnxFree(tOut)
       cnxThrow(tRc, "ecdh")
    end if
    return cnxTakeSecret(tOut, tOutLen)

@@ -50,26 +50,32 @@ CoinXT/
   SPEC.md                   what CoinXT is: the C/script split, the ABI contract, formats, security model
   IMPLEMENTATION-PLAN.md    the phased build order
   CLAUDE.md                 the operational guide + the FFI/C-ABI law (read before touching the shim)
+  CMakeLists.txt            the family build: the shared library + the ctest smoke test, all 5 platforms
   templates/
     CLAUDE.md               the portable xTalk/LiveCode/LCB lesson book (ALL the family's generic
                             engine lessons; copy it to the root of any NEW xTalk project)
-  .github/workflows/ci.yml  the gates in CI, run on every push / PR
+  .github/workflows/ci.yml  the gates + the native platform matrix; commits refreshed binaries on main
   native/
     coinxt.c                the C shim (cnx_ ABI over the vendored crypto)
-    build.sh                builds the shared library, and the ASan + UBSan self-test
-    MANIFEST.sha256         integrity pins: the vendored sources now; release binaries and the
-                            wordlist join in later phases
+    build.sh                the no-dependency developer loop (plain lib + ASan/UBSan self-test)
+    MANIFEST.sha256         integrity pins for the vendored SOURCES (the wordlist joins in phase 4)
     vendor/                 the vendored trezor-crypto subset (MIT) + VENDOR.md + LICENSE
   src/
     coinxt.lcb              the foreign-handler module (binds to cnx_*; needs an on-engine pass)
     coinxt.livecodescript   the public cx* API (script-side encodings land in phase 3)
+    code/                   committed per-platform native libraries (coinxt.so/.dll/.dylib), laid
+                            down by CI on main + pinned in src/code/MANIFEST.sha256
+  tests/
+    coinxt_smoke_test.c     walks every cnx_ export once (ctest on every CI lane; ASan via build.sh)
   tools/
     coin-kat.py             known-answer vectors (builds the shim headless, drives it via ctypes)
+    package-extension.py    stages src/code/<arch>-<platform>/coinxt.<ext> + its manifest
     check-livecodescript.py the static gate for .lcb / .livecodescript (carried verbatim)
     check-docs-style.py     the house-style gate for .md (carried verbatim)
-  examples/                 (later phases)
-    coinxt-demo.livecodescript    keygen, addresses, sign/verify, an HD wallet from a mnemonic
-    coinxt-tests.livecodescript   a pure, offline self-test harness (sPass/sFail, KATs)
+  examples/
+    coinxt-demo.livecodescript    the self-building showcase stack (keys, sign/verify/tamper,
+                                  ecrecover, ECDH, the Keccak-vs-SHA3 footgun)
+    coinxt-tests.livecodescript   the on-engine self-test harness: put cxSelfTest()
 ```
 
 ## The gates (run before any commit)
@@ -82,9 +88,14 @@ sh native/build.sh asan                       # ASan + UBSan native self-test
 ( cd native && sha256sum -c MANIFEST.sha256 ) # vendored-source integrity
 ```
 
-All five run in CI (`.github/workflows/ci.yml`). There is no headless way to compile or run
-`.livecodescript` / `.lcb` on OXT, so a script change additionally needs an on-engine pass; the honest
-status until then is "designed and statically reasoned" (see [CLAUDE.md](CLAUDE.md)).
+All five run in CI (`.github/workflows/ci.yml`), which additionally builds the native library for the
+full platform matrix (x86_64/x86 Linux, universal macOS, x86_64/x86 Windows via MinGW) on every push,
+runs the C smoke test on each lane, verifies the committed binaries against `src/code/MANIFEST.sha256`,
+and commits freshly built binaries back to `src/code/` on main so a clone ships a working extension
+(the SodiumXT / TorrentXT model). There is no headless way to compile or run `.livecodescript` / `.lcb`
+on OXT, so a script change additionally needs an on-engine pass; the honest status until then is
+"designed and statically reasoned" (see [CLAUDE.md](CLAUDE.md)). On a real engine, run
+`examples/coinxt-tests.livecodescript` (`put cxSelfTest()`) to re-pin the vectors through the cx* API.
 
 ## Status
 
@@ -97,9 +108,13 @@ classic public RFC 6979 vectors, the seckey range edges, the ecrecover round tri
 matters for a money library - CoinXT signatures VERIFY in the independent python-ecdsa library and
 match its outputs byte for byte, in both directions. The `.lcb` foreign module and the public `cx*`
 script API are written and pass the static gates; there is no headless OXT compiler, so their honest
-status is "designed and statically reasoned; needs an on-engine pass". Next: encodings/addresses
-(phase 3, pure script), then HD wallets and mnemonics (phase 4). Schnorr / BIP-340 is deferred to a
-Taproot phase (upstream provides it only through secp256k1-zkp).
+status is "designed and statically reasoned; needs an on-engine pass", and the on-engine self-test
+harness (`examples/coinxt-tests.livecodescript`) plus the self-building demo stack
+(`examples/coinxt-demo.livecodescript`) are ready for that pass. The build and packaging now follow
+the family model: a CMake build, a 5-platform CI matrix, and per-platform binaries committed under
+`src/code/` on main. Next: encodings/addresses (phase 3, pure script), then HD wallets and mnemonics
+(phase 4). Schnorr / BIP-340 is deferred to a Taproot phase (upstream provides it only through
+secp256k1-zkp).
 
 [SPEC.md](SPEC.md), [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md), and [CLAUDE.md](CLAUDE.md) are the
 design and the running as-built log. Every deterministic path is pinned to a public known-answer vector,

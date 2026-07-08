@@ -1,5 +1,10 @@
-# build outputs (committed release binaries arrive deliberately in the packaging
-# phase, pinned in native/MANIFEST.sha256; a stray local build never ships by accident)
-native/libcoinxt.so
-native/libcoinxt.dylib
-native/libcoinxt.dll
+# build outputs (committed release binaries arrive via the CI commit-binaries job
+# into src/code/<arch>-<platform>/, pinned in src/code/MANIFEST.sha256; a stray
+# local build never ships by accident)
+native/coinxt.*
+native/libcoinxt.*
+!native/coinxt.c
+/build/
+/build-*/
+__pycache__/
+*.pyc
