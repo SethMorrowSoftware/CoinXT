@@ -398,3 +398,33 @@ question that mattered:
   calling a function in a not-yet-loaded sibling script library raises "Function: error in function
   handler" with the function name as hint (the examples now preflight inside try/catch and say
   which layer is missing).
+
+**Phase 3 - encodings and addresses, pure script (2026-07-08).** The address layer that turns a key
+into a fundable-looking address landed in `src/coinxt.livecodescript`, entirely in script over the
+existing primitives (no native change, no ABI bump):
+
+- New public API: `cxHexEncode` / `cxHexDecode`, `cxBase58CheckEncode` / `cxBase58CheckDecode`
+  (byte-array long division, no big integer ever formed; the checksum is recomputed and compared on
+  decode, fail closed), `cxBech32Encode` (8->5 bit repack with a MASKED accumulator, the BIP-173
+  polymod with `bitXor` / factored `div`, bech32 const 1 for v0 and bech32m 0x2bc830a3 for v1+),
+  `cxEthAddress` / `cxEthAddressChecksum` (Keccak-256 + the EIP-55 mixed-case rule), and
+  `cxBtcAddressP2PKH` / `cxBtcAddressP2WPKH`. P2TR is deferred with Schnorr.
+- **How a money-critical SCRIPT encoder is verified without an engine:** the exact livecodescript
+  algorithm was transcribed 1:1 to Python and run against the canonical public vectors before pinning
+  (this caught three mis-transcribed bech32 generator constants on the first pass -
+  `0x26508e6d` / `0x1ea119fa` / `0x2a1462b3`, whose decimals I had wrong). The pinned addresses are the
+  famous ones: `bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4` (BIP-173) and
+  `0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf` (pk=1). `tools/coin-kat.py` now derives the pubkey from
+  the real shim and reference-encodes it in Python, asserting the result equals those public vectors -
+  so CI LOCKS the expected strings the on-engine harness checks (coin-kat cannot drive the
+  livecodescript, only lock its expected outputs). `examples/coinxt-tests.livecodescript` runs the
+  encoders on-engine (Base58Check round trip + corrupt-checksum rejection, all three address types,
+  EIP-55 idempotence and fail-closed length check). Honest status: **designed, transcription-verified,
+  and vector-locked; NEEDS AN ON-ENGINE PASS.**
+- The demo grew an **Addresses** tab (eight tabs now; the tab labels were shortened so the row still
+  fits the 900px window): one key -> P2PKH, P2WPKH, and Ethereum addresses, with copy buttons.
+
+Next: BIP-39 seed phrases (pure script + the shipped 2048-word list; `mnemonic -> seed` already works
+via `cxPbkdf2HmacSha512`), then BIP-32 HD derivation (the one piece that NEEDS native work - the child
+key tweak is secp256k1 scalar/point math, so it means vendoring `bip32.c`, an ABI bump to 3, and
+rebuilt binaries).

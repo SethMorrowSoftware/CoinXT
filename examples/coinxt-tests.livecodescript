@@ -40,6 +40,11 @@ constant kSigSatoshi = "934b1ea10a4b3c1757e2b0c017d0b6143ce3c9a7e6a4a49860d7a6ab
 -- pubkey(0xB0B) compressed, and x(0xA11CE * 0xB0B * G), the raw SEC1 ECDH secret
 constant kPubB33 = "035d45cb81aa765d69ca52e3869491ecf0e8fdf6a63d64e65b5213647ee4973ae5"
 constant kEcdhX = "74f43c053591097e99e0886e03499baec02c6702a12db92347151afadf03cd8d"
+-- canonical mainnet addresses of pubkey(1): the legacy Base58Check address,
+-- the BIP-173 SegWit example, and the pk=1 Ethereum EIP-55 address (all public)
+constant kAddrP2PKH = "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"
+constant kAddrP2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+constant kAddrEth = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
 
 function cxSelfTest
    local tAbi
@@ -85,6 +90,8 @@ function cxSelfTest
    testSign
    testRecover
    testEcdh
+   testEncodings
+   testAddresses
 
    put return & "----" & return after sLog
    put "PASSED:" && sPass & "   FAILED:" && sFail after sLog
@@ -275,3 +282,43 @@ on testEcdh
    cxtCheck cxIsError(cxEcdh(cxtBin(kSkA), cxtAscii("not a pubkey"))), \
       "a malformed pubkey fails closed with a clean error"
 end testEcdh
+
+on testEncodings
+   local tRoundHex
+   local tDecoded
+   cxtSection "encodings (hex, Base58Check)"
+   -- hex round trip
+   put cxHexEncode(cxtBin("deadbeef")) into tRoundHex
+   cxtCheck (tRoundHex is "deadbeef"), "hex encode round trip"
+   cxtCheck cxIsError(cxHexDecode("xyz")), "hex decode rejects non-hex (fail closed)"
+   cxtCheck cxIsError(cxHexDecode("abc")), "hex decode rejects an odd length (fail closed)"
+   -- Base58Check round trip: version 0x00 + a 20-byte payload, then decode back
+   put cxBase58CheckDecode(kAddrP2PKH) into tDecoded
+   cxtCheck (line 1 of tDecoded is "0"), "Base58Check decode recovers version 0x00"
+   cxtCheck (cxHexEncode(line 2 to -1 of tDecoded) is "751e76e8199196d454941c45d1b3a323f1433bd6"), \
+      "Base58Check decode recovers the hash160 payload"
+   -- a corrupt checksum must be rejected (flip the last character)
+   cxtCheck cxIsError(cxBase58CheckDecode("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMx")), \
+      "Base58Check rejects a corrupt checksum (fail closed)"
+end testEncodings
+
+on testAddresses
+   cxtSection "addresses (BTC legacy / SegWit, ETH EIP-55)"
+   -- all three derived from pubkey(1); pinned to public BIP-173 / EIP-55 vectors
+   cxtCheck (cxBtcAddressP2PKH(cxtBin(kG33), true) is kAddrP2PKH), \
+      "P2PKH(pubkey 1) is the canonical legacy address"
+   cxtCheck (cxBtcAddressP2WPKH(cxtBin(kG33), true) is kAddrP2WPKH), \
+      "P2WPKH(pubkey 1) is the BIP-173 SegWit example address"
+   cxtCheck (cxEthAddress(cxtBin(kG65)) is kAddrEth), \
+      "ethAddress(pubkey 1) is the pk=1 EIP-55 address"
+   -- the compressed pubkey feeds the same Ethereum address (decompressed inside)
+   cxtCheck (cxEthAddress(cxtBin(kG33)) is kAddrEth), \
+      "ethAddress accepts a compressed pubkey too"
+   -- EIP-55 validation: the checksummed form is stable, a bad-length input fails
+   cxtCheck (cxEthAddressChecksum(kAddrEth) is kAddrEth), \
+      "EIP-55 re-checksum is idempotent on a valid address"
+   cxtCheck (cxEthAddressChecksum(toLower(kAddrEth)) is kAddrEth), \
+      "EIP-55 restores mixed case from an all-lowercase address"
+   cxtCheck cxIsError(cxEthAddressChecksum("0x1234")), \
+      "EIP-55 rejects a wrong-length address (fail closed)"
+end testAddresses
