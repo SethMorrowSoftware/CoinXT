@@ -121,7 +121,11 @@ jobs:
           - os: macos-latest
             platform_id: universal-mac
             ext: dylib
-            cmake_args: '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64'
+            # The inner quotes are LOAD-BEARING: this string is substituted into
+            # a `run:` shell line, and an unquoted semicolon would end the cmake
+            # command and try to execute `x86_64` (exit 127, the bug that blocked
+            # the first commit-binaries run). Same quoting as SodiumXT's lane.
+            cmake_args: '-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"'
           - os: windows-latest
             platform_id: x86_64-win32
             ext: dll
@@ -222,7 +226,9 @@ jobs:
   commit-binaries:
     name: commit native binaries to main
     needs: native
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # workflow_dispatch on main is allowed too, so a missed refresh (a failed
+    # lane, a permissions fix) can be re-run without pushing a dummy commit.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -259,5 +265,8 @@ jobs:
             exit 0
           fi
           git commit -m "ci: refresh bundled native binaries for all platforms [skip ci]"
-          git push origin HEAD:main || \
-            echo "push rejected (branch advanced during the run); the next merge refreshes it."
+          # Fail LOUDLY if the push is rejected. The likely cause is the repo's
+          # Actions "Workflow permissions" not being "Read and write"; swallowing
+          # it here would leave main silently without binaries. If main simply
+          # advanced during the run, rerun this workflow via workflow_dispatch.
+          git push origin HEAD:main
