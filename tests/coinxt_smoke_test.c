@@ -35,6 +35,9 @@ extern int cnx_hdnode_derive(const unsigned char *, int, int, unsigned char *);
 extern int cnx_hdnode_private_key(const unsigned char *, unsigned char *);
 extern int cnx_hdnode_public_key(const unsigned char *, unsigned char *);
 extern int cnx_hdnode_chaincode(const unsigned char *, unsigned char *);
+extern int cnx_xonly_from_seckey(const unsigned char *, unsigned char *);
+extern int cnx_schnorr_sign(const unsigned char *, const unsigned char *, const unsigned char *, unsigned char *);
+extern int cnx_schnorr_verify(const unsigned char *, const unsigned char *, const unsigned char *);
 extern int cnx_wipe(unsigned char *, size_t);
 
 static int eq(const unsigned char *b, const char *hexexp) {
@@ -49,6 +52,7 @@ int main(void) {
   unsigned char o[64], sk1[32], sk2[32], pub33[33], pub65[65], dec65[65];
   unsigned char sig[65], rec[65], sh1[32], sh2[32], hash[32];
   unsigned char node[73], child[73], hdpriv[32], hdpub[33], hdcc[32];
+  unsigned char xonly[32], schsig[64], aux[32];
   NEED(cnx_abi_version() == 3, "ABI");
   cnx_keccak256((const unsigned char *)"", 0, o);
   NEED(eq(o, "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"), "keccak empty");
@@ -97,6 +101,16 @@ int main(void) {
   NEED(cnx_hdnode_public_key(node, hdpub) == 0, "hdnode pubkey");
   NEED(cnx_hdnode_chaincode(node, hdcc) == 0, "hdnode chaincode");
   NEED(cnx_seckey_verify(hdpriv) == 0, "derived key is a valid seckey");
+  /* Schnorr / BIP-340: x-only pubkey, sign (NULL aux + explicit aux), verify,
+   * and corrupt-signature rejection (correctness pinned in tools/coin-kat.py) */
+  NEED(cnx_xonly_from_seckey(sk1, xonly) == 0, "schnorr xonly");
+  NEED(cnx_schnorr_sign(sk1, hash, NULL, schsig) == 0, "schnorr sign null aux");
+  NEED(cnx_schnorr_verify(xonly, hash, schsig) == 0, "schnorr verify");
+  memset(aux, 0x5a, 32);
+  NEED(cnx_schnorr_sign(sk1, hash, aux, schsig) == 0, "schnorr sign aux");
+  NEED(cnx_schnorr_verify(xonly, hash, schsig) == 0, "schnorr verify aux");
+  schsig[10] ^= 1;
+  NEED(cnx_schnorr_verify(xonly, hash, schsig) != 0, "schnorr corrupt rejected");
   NEED(cnx_wipe(sh1, 32) == 0 && sh1[0] == 0 && sh1[31] == 0, "wipe");
   printf("cnx_selftest: OK\n");
   return 0;
