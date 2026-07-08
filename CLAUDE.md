@@ -692,3 +692,21 @@ scope stays honest. Pure script (no native change, ABI 3, binaries untouched).
 - Demo: an EIP-712 button on the Ethereum tab signs the Mail example with the CURRENT key and
   shows the whole chain (domain separator, struct hash, digest, r||s, v, signer).
 - Honest status: NEEDS AN ON-ENGINE PASS (`testEip712` is the checklist).
+
+**Phase 6c - BIP-322 generic signed messages (2026-07-08).** The deferred Bitcoin half of the
+modern-signing round, delivered. Pure script (no native change, ABI 3, binaries untouched).
+
+- New public API: `cxBip322Hash` (the BIP0322-signed-message tagged hash), `cxBip322Sign` (the
+  "simple" signature for the key's P2WPKH address: the message hash is wrapped in the BIP's
+  virtual to_spend / to_sign transaction pair and signed exactly like a real spend via the
+  existing BIP-143 path; the proof is the base64 witness stack), and `cxBip322Verify` (boolean,
+  fail closed; bc1q addresses only, other types recorded as out of scope). `cxDerToSig` (private)
+  is the strict inverse of cxSigToDer.
+- Anchors, verified through the shim BEFORE pinning (`run_bip322_checks`, on-engine `testBip322`):
+  the BIP's published message hashes and test address reproduce, and - the interop that matters -
+  the BIP's PUBLISHED signatures (made by Bitcoin Core) VERIFY here. Core grinds low-R nonces, so
+  its published bytes differ from our plain RFC 6979 signature; each side verifies the other,
+  which is exactly what BIP-322 is for. Our own signature round-trips through cxBip322Verify.
+- Demo: the Sign tab gained a BIP-322 row (sign a proof with the current key; check a pasted
+  address + base64 proof against the message field - Sparrow / Core signatures verify here).
+- Honest status: NEEDS AN ON-ENGINE PASS (`testBip322` is the checklist).

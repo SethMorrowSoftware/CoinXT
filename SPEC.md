@@ -243,6 +243,10 @@ EIP-712 typed structured data (COMPOSABLE: a nested struct's hash is its parent'
   cxEip712TypeHash(pTypeString) / cxEip712HashStruct(pTypeString, pWords)
   cxEip712WordUInt(pDec) / cxEip712WordAddress(p0x) / cxEip712WordHash(pData)
   cxEip712Digest(pDomainSeparator, pStructHash)   -> sign with cxSignRecoverable (v = recid + 27)
+
+BIP-322 generic signed messages (the "simple" P2WPKH form):
+  cxBip322Hash(pMessage) / cxBip322Sign(pSeckey, pMessage) -> base64 proof
+  cxBip322Verify(pAddress, pMessage, pSigB64)              -> boolean, fail closed
 ```
 
 ## 7. Formats CoinXT must get byte-exact (the spec inside the spec)

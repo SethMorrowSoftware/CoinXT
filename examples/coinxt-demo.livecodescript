@@ -488,6 +488,9 @@ on buildSignTab
    cxdInput "sign:vpub", "48,478,560,508", ""
    cxdInput "sign:vsig", "572,478,1010,508", ""
    cxdButton "sign:vgo", "1022,478,1152,508", "Check", "idle"
+   cxdCap "sign:b322Label", "48,518,1152,536", "BIP-322 (proof you control a bc1q address): Sign makes a portable base64 proof of the message above; Check verifies one (address in the LEFT box, base64 signature in the RIGHT box). Signatures from Bitcoin Core / Sparrow verify here and vice versa.", kClrInkMute
+   cxdButton "sign:b322sign", "48,544,268,574", "BIP-322 sign (my key)", "idle"
+   cxdButton "sign:b322check", "280,544,480,574", "Check BIP-322", "idle"
    cxdLabel "sign:status", "48,596,1152,628", "Make a key on the Keys tab, then Sign here.", kClrInkSoft, 12, "plain"
 end buildSignTab
 
@@ -618,7 +621,7 @@ end buildDecodeTab
 -- ---- About tab (pitch + embedded self-test)
 on buildAboutTab
    cxdHdr "about:h", "48,128,1152,156", "CoinXT: Bitcoin and Ethereum primitives for xTalk"
-   cxdCap "about:exp", "48,158,1152,290", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), act as a PSBT cold signer (decode, sign, finalize BIP-174 files from Sparrow / Electrum / Core, including HD signing via the PSBT's own derivation paths), sign EIP-712 typed data (the chain behind every signTypedData prompt, pinned to the EIP's own example), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
+   cxdCap "about:exp", "48,158,1152,290", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), act as a PSBT cold signer (decode, sign, finalize BIP-174 files from Sparrow / Electrum / Core, including HD signing via the PSBT's own derivation paths), sign EIP-712 typed data (the chain behind every signTypedData prompt, pinned to the EIP's own example), prove address ownership with BIP-322 signed messages (the BIP's own Core-made signatures verify here), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
    cxdButton "about:selftest", "48,298,300,328", "Run the full self-test", "primary"
    cxdMono "about:out", "48,338,1152,586"
    cxdLabel "about:status", "48,596,1152,628", "Click Run the full self-test to check every primitive against a public vector.", kClrInkSoft, 12, "plain"
@@ -916,8 +919,43 @@ on handleSign pRole
       doTamper
    else if pRole is "vgo" then
       doVerifyPasted
+   else if pRole is "b322sign" then
+      doBip322Sign
+   else if pRole is "b322check" then
+      doBip322Check
    end if
 end handleSign
+
+-- BIP-322: a portable, wallet-interoperable proof that the current key
+-- controls its bc1q address and endorses the message field
+on doBip322Sign
+   local tAddr
+   local tSig
+   local tOut
+   if haveKey("sign:status") is false then
+      exit doBip322Sign
+   end if
+   put cxBtcAddressP2WPKH(sPub33, true) into tAddr
+   put cxBip322Sign(sSeckey, cxdAscii(field "sign:msg")) into tSig
+   if cxIsError(tSig) then
+      cxdStatus "sign:status", tSig, "bad"
+      exit doBip322Sign
+   end if
+   put "address    " & tAddr & return & "message    " & field "sign:msg" \
+      & return & "bip322     " & tSig into tOut
+   put tOut into field "sign:out"
+   cxdStatus "sign:status", "A portable proof: paste the address + signature into Sparrow or Core (verifymessage) and it checks out there too.", "ok"
+end doBip322Sign
+
+on doBip322Check
+   local tOk
+   put cxBip322Verify(word 1 to -1 of field "sign:vpub", cxdAscii(field "sign:msg"), word 1 to -1 of field "sign:vsig") into tOk
+   if tOk is true then
+      cxdStatus "sign:status", "VALID: whoever made this signature controls that address and endorsed this exact message.", "ok"
+   else
+      cxdStatus "sign:status", "Does NOT verify: wrong address, wrong message, or a corrupt signature (fail closed).", "bad"
+   end if
+end doBip322Check
 
 -- third-party verification: paste any pubkey + raw signature and check them
 -- against SHA-256 of the message field. Sign here and verify in another

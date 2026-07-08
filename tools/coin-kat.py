@@ -1814,6 +1814,104 @@ def run_eip712_checks(lib, kat):
 
 
 # ---------------------------------------------------------------------------
+# BIP-322 generic signed messages ("simple", P2WPKH). Anchors: the BIP's
+# published message hashes and test address reproduce, our deterministic
+# signature round-trips through the verify mirror, and - the interop that
+# matters - the BIP's PUBLISHED signatures (made by Bitcoin Core, whose
+# low-R nonce grinding makes different but equally valid bytes) VERIFY here.
+BIP322_HASH_EMPTY = \
+    "c90c269c4f8fcbe6880f72a721ddfbf1914268a794cbb21cfafee13770ae19f1"
+BIP322_HASH_HELLO = \
+    "f0eb03b1a75ac6d9847f55c624a99169b5dccba2a31f5b23bea77ba270de0a7a"
+BIP322_WIF = "L3VFeEujGtevx9w18HD1fhRbCH67Az2dpCymeRE1SoPK6XQtaN2k"
+BIP322_ADDR = "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l"
+BIP322_SIG_HELLO = (
+    "AkcwRAIgZRfIY3p7/DoVTty6YZbWS71bc5Vct9p9Fia83eRmw2QCICK/ENGfwLtptFlu"
+    "MGs2KsqoNSk89pO7F29zJLUx9a/sASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XC"
+    "sMvViHI=")
+BIP322_SIG_EMPTY = (
+    "AkcwRAIgM2gBAQqvZX15ZiysmKmQpDrG83avLIT492QBzLnQIxYCIBaTpOaD20qRlEyl"
+    "yxFSeEA2ba9YOixpX8z46TSDtS40ASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XC"
+    "sMvViHI=")
+
+
+def _b322_hash(msg):
+    t = hashlib.sha256(b"BIP0322-signed-message").digest()
+    return hashlib.sha256(t + t + msg).digest()
+
+
+def _b322_sighash(h160, msg):
+    def u32(n):
+        return n.to_bytes(4, "little")
+
+    def u64(n):
+        return n.to_bytes(8, "little")
+    ssig = b"\x00\x20" + _b322_hash(msg)
+    spk = b"\x00\x14" + h160
+    to_spend = (u32(0) + b"\x01" + b"\x00" * 32 + b"\xff\xff\xff\xff"
+                + bytes([len(ssig)]) + ssig + u32(0)
+                + b"\x01" + u64(0) + bytes([len(spk)]) + spk + u32(0))
+    outpoint = _dsha(to_spend) + u32(0)
+    outs = u64(0) + b"\x01\x6a"
+    sc = b"\x19\x76\xa9\x14" + h160 + b"\x88\xac"
+    pre = (u32(0) + _dsha(outpoint) + _dsha(u32(0)) + outpoint + sc
+           + u64(0) + u32(0) + _dsha(outs) + u32(0) + u32(1))
+    return _dsha(pre)
+
+
+def _b322_verify(lib, addr, msg, sig_b64):
+    import base64
+    got = _bech32_decode(addr)
+    if isinstance(got, str) or got[1] != 0 or len(got[2]) != 20:
+        return False
+    w = base64.b64decode(sig_b64)
+    if w[0] != 2:
+        return False
+    dlen = w[1]
+    der = w[2:2 + dlen]
+    if w[2 + dlen] != 33 or len(w) != 36 + dlen:
+        return False
+    pub = w[3 + dlen:36 + dlen]
+    if _h160(pub) != got[2] or der[-1] != 1:
+        return False
+    rl = der[3]
+    r = der[4:4 + rl].lstrip(b"\x00").rjust(32, b"\x00")
+    sl = der[4 + rl + 1]
+    sv = der[6 + rl:6 + rl + sl].lstrip(b"\x00").rjust(32, b"\x00")
+    return lib.cnx_ecdsa_verify(pub, len(pub), _b322_sighash(got[2], msg),
+                                r + sv) == 0
+
+
+def run_bip322_checks(lib, kat):
+    import base64
+    kat.check("BIP-322 tagged hash of empty",
+              _b322_hash(b"").hex() == BIP322_HASH_EMPTY)
+    kat.check("BIP-322 tagged hash of Hello World",
+              _b322_hash(b"Hello World").hex() == BIP322_HASH_HELLO)
+    sk = _b58decode(BIP322_WIF)[1:33]
+    pub = pubkey(lib, sk, True)
+    kat.check("BIP-322 test key yields the published address",
+              _bech32_p2wpkh("bc", _h160(pub)) == BIP322_ADDR)
+    # the BIP's published Core signatures verify here (the interop anchor)
+    kat.check("published Hello World signature verifies",
+              _b322_verify(lib, BIP322_ADDR, b"Hello World", BIP322_SIG_HELLO))
+    kat.check("published empty-message signature verifies",
+              _b322_verify(lib, BIP322_ADDR, b"", BIP322_SIG_EMPTY))
+    kat.check("a signature does not verify for a different message",
+              not _b322_verify(lib, BIP322_ADDR, b"hello world",
+                               BIP322_SIG_HELLO))
+    # our own deterministic signature round-trips
+    sig = ctypes.create_string_buffer(64)
+    assert lib.cnx_ecdsa_sign(sk, _b322_sighash(_h160(pub), b"Hello World"),
+                              sig) == 0
+    der = _sig_to_der(sig.raw) + b"\x01"
+    ours = base64.b64encode(b"\x02" + bytes([len(der)]) + der
+                            + b"\x21" + pub).decode()
+    kat.check("our deterministic signature verifies too",
+              _b322_verify(lib, BIP322_ADDR, b"Hello World", ours))
+
+
+# ---------------------------------------------------------------------------
 # The wallet-restore path (the demo's headline feature): the canonical BIP-39
 # test mnemonic restores, through the SHIM's real HD-node derivation, to the
 # OFFICIAL BIP-84 and BIP-86 first addresses (those two strings are printed
@@ -1932,6 +2030,7 @@ def main(argv):
         run_btc_tx_checks(lib, kat)
         run_psbt_checks(lib, kat)
         run_eip712_checks(lib, kat)
+        run_bip322_checks(lib, kat)
         run_restore_checks(lib, kat)
 
     if kat.problems:

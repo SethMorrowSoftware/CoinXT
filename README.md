@@ -137,7 +137,8 @@ script: hex, Base58Check, Bech32/Bech32m (encode AND decode), WIF, EIP-55, EIP-1
 hashing, RLP (composable encoders that build a complete EIP-155 transaction), strict-DER signature
 framing, address-to-scriptPubKey, a single-input BIP-143 P2WPKH/nested transaction signer, a
 BIP-174 PSBT decode/sign/finalize surface (the Sparrow / Electrum / Core interchange), an EIP-712
-typed-data surface pinned to the EIP's own example, the BTC
+typed-data surface pinned to the EIP's own example, BIP-322 signed messages (Core's published
+signatures verify here), the BTC
 (P2PKH, P2SH-P2WPKH, P2WPKH, P2TR) + ETH address builders, xprv/xpub framing, and the BIP-39
 mnemonic surface over the embedded 2048-word list - all transcription-verified against Python and
 vector-locked in CI (BIP-173/350, BIP-49/84/86, EIP-55, Trezor BIP-39, BIP-32, the published WIF

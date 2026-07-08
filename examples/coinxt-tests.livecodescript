@@ -122,6 +122,13 @@ constant kEipDigest = "be609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf3
 constant kEipR = "4355c47d63924e8a72e509b65029052eb6c299d53a04e167c5775fd466751c9d"
 constant kEipS = "07299936d304c153f6443dfa05f40ff007d72911b6f72307f996231605b91562"
 constant kEipSigner = "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826"
+-- BIP-322: the BIP's published test key/address and its published (Bitcoin
+-- Core, low-R-ground) signatures, which must VERIFY here; our own RFC 6979
+-- signature differs in bytes but round-trips through the same verifier
+constant kB322Wif = "L3VFeEujGtevx9w18HD1fhRbCH67Az2dpCymeRE1SoPK6XQtaN2k"
+constant kB322Addr = "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l"
+constant kB322SigHello = "AkcwRAIgZRfIY3p7/DoVTty6YZbWS71bc5Vct9p9Fia83eRmw2QCICK/ENGfwLtptFluMGs2KsqoNSk89pO7F29zJLUx9a/sASECx/EgAxlkQpQ9hYjgGu6EBCPMVPwVIVJqO4XCsMvViHI="
+constant kB322HashHello = "f0eb03b1a75ac6d9847f55c624a99169b5dccba2a31f5b23bea77ba270de0a7a"
 constant kPsbtHdRaw = "02000000000101aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000fdffffff01905f010000000000160014751e76e8199196d454941c45d1b3a323f1433bd602483045022100cae928967fc76aa2e058328d58d824f58472fe659066dc6aa9c5ba2449b4359c02201f202c8eb5dfe810a28e465c68d260ec6c263be7acb42e528fb4bda055a7dc1001210330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c00000000"
 
 function cxSelfTest
@@ -178,6 +185,7 @@ function cxSelfTest
    testBtcTx
    testPsbt
    testEip712
+   testBip322
    testMnemonics
    testHd
    testSchnorr
@@ -638,6 +646,32 @@ on testEip712
       "a wrong mixed-case address fails closed"
    put empty into tSk
 end testEip712
+
+-- BIP-322 generic signed messages: hash, sign, and - the interop that
+-- matters - verify the BIP's PUBLISHED Core-made signature
+on testBip322
+   local tDec
+   local tSk
+   local tSig
+   cxtSection "BIP-322 signed messages"
+   cxtCheck (cxHexEncode(cxBip322Hash(cxtAscii("Hello World"))) is kB322HashHello), \
+      "the tagged message hash matches the BIP's published value"
+   put cxWifDecode(kB322Wif) into tDec
+   put line 3 to -1 of tDec into tSk
+   cxtCheck (cxBtcAddressP2WPKH(cxPublicKey(tSk, true), true) is kB322Addr), \
+      "the BIP's test key yields its published address"
+   cxtCheck (cxBip322Verify(kB322Addr, cxtAscii("Hello World"), kB322SigHello) is true), \
+      "the BIP's PUBLISHED signature verifies (Core interop)"
+   cxtCheck (cxBip322Verify(kB322Addr, cxtAscii("hello world"), kB322SigHello) is false), \
+      "the signature does not verify for a different message"
+   put cxBip322Sign(tSk, cxtAscii("Hello World")) into tSig
+   cxtCheck (cxBip322Verify(kB322Addr, cxtAscii("Hello World"), tSig) is true), \
+      "our own deterministic signature round-trips"
+   cxtCheck (cxBip322Verify("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", cxtAscii("Hello World"), tSig) is false), \
+      "the wrong address is rejected (fail closed)"
+   put empty into tSk
+   put empty into tDec
+end testBip322
 
 -- the demo's headline flow, end to end on-engine: the canonical mnemonic
 -- restores to the published first addresses of every standard path (the
