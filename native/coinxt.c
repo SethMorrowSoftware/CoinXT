@@ -8,9 +8,11 @@
  *
  * Phase 1: the full hash/KDF surface + the ABI guard + the length functions.
  * Phase 2: the secp256k1 curve surface (pubkey, ECDSA/RFC 6979, recoverable,
- * recover, ECDH). HD (BIP-32) and mnemonic (BIP-39) exports land in later
- * phases; Schnorr / BIP-340 is deferred until the Taproot phase because this
- * upstream commit provides it only through secp256k1-zkp (see VENDOR.md).
+ * recover, ECDH). Phase 4b (ABI 3): BIP-32 HD child-key derivation and BIP-340
+ * Schnorr, both transcribing a standard PUBLIC scheme over the audited
+ * primitives already vendored rather than pulling in trezor's multi-curve
+ * bip32.c or the whole secp256k1-zkp (see the section banners and VENDOR.md).
+ * BIP-39 mnemonics live in the script layer (they need no curve math).
  *
  * ABI rules (CLAUDE.md, carried family FFI law):
  *  - byte buffers cross as Pointer + length; sizes are size_t;
@@ -29,6 +31,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h> /* memcpy for the HD node blob field moves */
 
 #include "ecdsa.h"     /* vendored trezor-crypto: sign/verify/recover/ECDH   */
 #include "bignum.h"    /* scalar range check for cnx_seckey_verify           */
@@ -55,7 +58,7 @@
 
 /* ---- ABI version + status codes (stable; never renumber a shipped code) ---- */
 
-#define CNX_ABI_VERSION 2 /* 2: phase-2 curve surface added (2026-07-08) */
+#define CNX_ABI_VERSION 3 /* 3: BIP-32 HD nodes + Schnorr/BIP-340 (2026-07-08) */
 
 #define CNX_OK 0
 #define CNX_ERR_NULL (-1)     /* a required buffer pointer was NULL */
@@ -83,6 +86,10 @@ size_t cnx_ecdsa_sig_len(void) { return 64; }
 size_t cnx_recoverable_sig_len(void) { return 65; }
 size_t cnx_digest_len(void) { return 32; }
 size_t cnx_ecdh_secret_len(void) { return 32; }
+size_t cnx_hdnode_len(void) { return 73; }
+size_t cnx_chaincode_len(void) { return 32; }
+size_t cnx_xonly_len(void) { return 32; }        /* BIP-340 x-only pubkey */
+size_t cnx_schnorr_sig_len(void) { return 64; }  /* BIP-340 signature     */
 
 /* ---- the trezor-crypto integrator RNG hook --------------------------------
  * The phase-0 assumption was that nothing calls this once signing is RFC 6979
@@ -375,5 +382,353 @@ int cnx_ecdh(const unsigned char *sk32, const unsigned char *pub,
   }
   for (i = 0; i < 32; i++) out32[i] = session[1 + i];
   memzero(session, sizeof(session));
+  return CNX_OK;
+}
+
+/* ---- HD (BIP-32) nodes, secp256k1 only --------------------------------------
+ * The node crosses the ABI as a fixed 73-byte opaque blob (SPEC.md 5.1):
+ *   [depth:1][parent_fingerprint:4][child_num:4 BE][chain_code:32][priv:32]
+ * These are exactly the fields BIP-32's xprv/xpub serialization needs; the
+ * script layer adds the version bytes and Base58Check framing.
+ *
+ * We deliberately do NOT vendor trezor's bip32.c: it is multi-curve and drags
+ * in the whole tree (aes, cardano, nem, nist256p1, the ed25519-donna subtree).
+ * cnx_hdnode_derive instead transcribes trezor's OWN secp256k1 child-key
+ * derivation (hdnode_private_ckd_bip32) over the same audited primitives we
+ * already vendor (hmac_sha512, bn_add/bn_mod, ecdsa_get_public_key33). Every
+ * result is pinned to the official BIP-32 test vectors headless
+ * (tools/coin-kat.py). This is a standard, public KEY-DERIVATION SCHEME
+ * composing audited ops - like hash160 or the address encoders - not a new
+ * curve op or hash. */
+
+#define CNX_HDNODE_LEN 73
+#define CNX_HD_DEPTH 0
+#define CNX_HD_FP 1
+#define CNX_HD_CHILD 5
+#define CNX_HD_CC 9
+#define CNX_HD_KEY 41
+
+/* cnx_hdnode_len() is defined with the other length functions above. */
+
+/* fingerprint = first 4 bytes of hash160(pubkey33) */
+static void cnx_hd_fingerprint(const unsigned char *pub33, unsigned char *out4) {
+  unsigned char sha[32], rip[20];
+  sha256_Raw(pub33, 33, sha);
+  ripemd160(sha, 32, rip);
+  out4[0] = rip[0];
+  out4[1] = rip[1];
+  out4[2] = rip[2];
+  out4[3] = rip[3];
+}
+
+static void cnx_put_be32(unsigned char *p, uint32_t v) {
+  p[0] = (unsigned char)((v >> 24) & 0xff);
+  p[1] = (unsigned char)((v >> 16) & 0xff);
+  p[2] = (unsigned char)((v >> 8) & 0xff);
+  p[3] = (unsigned char)(v & 0xff);
+}
+
+/* master node from a seed: I = HMAC-SHA512("Bitcoin seed", seed); IL is the
+ * master private key (must be in [1, n-1]; a seed producing an out-of-range IL
+ * is rejected, ~2^-128), IR the chain code. depth 0, fingerprint 0, child 0. */
+int cnx_hdnode_from_seed(const unsigned char *seed, size_t slen,
+                         unsigned char *out_node) {
+  unsigned char I[64];
+  bignum256 a;
+  int ok;
+  if (seed == NULL || out_node == NULL) return CNX_ERR_NULL;
+  if (slen == 0 || slen > UINT32_MAX) return CNX_ERR_BADLEN;
+  hmac_sha512((const uint8_t *)"Bitcoin seed", 12, seed, (uint32_t)slen, I);
+  bn_read_be(I, &a);
+  ok = !bn_is_zero(&a) && bn_is_less(&a, &secp256k1.order);
+  memzero(&a, sizeof(a));
+  if (!ok) {
+    memzero(I, sizeof(I));
+    return CNX_ERR_BADKEY;
+  }
+  memzero(out_node, CNX_HDNODE_LEN);
+  out_node[CNX_HD_DEPTH] = 0;
+  /* fingerprint (4) and child (4) already zero from memzero */
+  memcpy(out_node + CNX_HD_CC, I + 32, 32);
+  memcpy(out_node + CNX_HD_KEY, I, 32);
+  memzero(I, sizeof(I));
+  return CNX_OK;
+}
+
+/* one BIP-32 step. index is 0..2^31-1; hardened != 0 sets the high bit. The
+ * out node's parent_fingerprint is hash160(parent pubkey)[:4], so the child
+ * blob is fully serializable to xprv/xpub in script. Returns CNX_ERR_BADKEY on
+ * the ~2^-127 case where IL >= n or the child key is zero (BIP-32 says use the
+ * next index); the caller retries with index+1. */
+int cnx_hdnode_derive(const unsigned char *node, int index, int hardened,
+                      unsigned char *out_node) {
+  unsigned char data[1 + 32 + 4];
+  unsigned char I[64];
+  unsigned char parent_pub[33];
+  bignum256 a, b;
+  uint32_t i;
+  if (node == NULL || out_node == NULL) return CNX_ERR_NULL;
+  if (index < 0) return CNX_ERR_RANGE;
+  i = (uint32_t)index;
+  if (hardened) i |= 0x80000000u;
+
+  /* the parent pubkey is needed for a non-hardened step's data AND for the
+   * child's parent fingerprint, so derive it up front */
+  if (ecdsa_get_public_key33(&secp256k1, node + CNX_HD_KEY, parent_pub) != 0)
+    return CNX_ERR_BADKEY;
+
+  if (i & 0x80000000u) {
+    data[0] = 0;
+    memcpy(data + 1, node + CNX_HD_KEY, 32); /* 0x00 || parent priv */
+  } else {
+    memcpy(data, parent_pub, 33);
+  }
+  cnx_put_be32(data + 33, i);
+
+  bn_read_be(node + CNX_HD_KEY, &a);
+  hmac_sha512(node + CNX_HD_CC, 32, data, sizeof(data), I);
+
+  bn_read_be(I, &b);
+  if (!bn_is_less(&b, &secp256k1.order)) {
+    memzero(&a, sizeof(a));
+    memzero(&b, sizeof(b));
+    memzero(I, sizeof(I));
+    return CNX_ERR_BADKEY;
+  }
+  bn_add(&b, &a);              /* b = IL + kpar */
+  bn_mod(&b, &secp256k1.order); /* mod n */
+  if (bn_is_zero(&b)) {
+    memzero(&a, sizeof(a));
+    memzero(&b, sizeof(b));
+    memzero(I, sizeof(I));
+    return CNX_ERR_BADKEY;
+  }
+
+  out_node[CNX_HD_DEPTH] = (unsigned char)(node[CNX_HD_DEPTH] + 1);
+  cnx_hd_fingerprint(parent_pub, out_node + CNX_HD_FP);
+  cnx_put_be32(out_node + CNX_HD_CHILD, i);
+  memcpy(out_node + CNX_HD_CC, I + 32, 32);
+  bn_write_be(&b, out_node + CNX_HD_KEY);
+
+  memzero(&a, sizeof(a));
+  memzero(&b, sizeof(b));
+  memzero(I, sizeof(I));
+  memzero(data, sizeof(data));
+  return CNX_OK;
+}
+
+int cnx_hdnode_private_key(const unsigned char *node, unsigned char *out32) {
+  if (node == NULL || out32 == NULL) return CNX_ERR_NULL;
+  memcpy(out32, node + CNX_HD_KEY, 32);
+  return CNX_OK;
+}
+
+int cnx_hdnode_public_key(const unsigned char *node, unsigned char *out33) {
+  if (node == NULL || out33 == NULL) return CNX_ERR_NULL;
+  if (ecdsa_get_public_key33(&secp256k1, node + CNX_HD_KEY, out33) != 0)
+    return CNX_ERR_BADKEY;
+  return CNX_OK;
+}
+
+int cnx_hdnode_chaincode(const unsigned char *node, unsigned char *out32) {
+  if (node == NULL || out32 == NULL) return CNX_ERR_NULL;
+  memcpy(out32, node + CNX_HD_CC, 32);
+  return CNX_OK;
+}
+
+/* ---- Schnorr / BIP-340 (Taproot), secp256k1 only ----------------------------
+ * BIP-340 Schnorr signatures over the caller's 32-byte message. As with ECDSA,
+ * CoinXT signs exactly the bytes the app hands it and never builds the sighash
+ * (SPEC.md section 8 rule 5). Like BIP-32 above, this is NOT a new curve op: it
+ * transcribes the BIP-340 SCHEME - a standard, published construction - over
+ * the same audited trezor-crypto primitives already vendored (scalar_multiply
+ * = k*G, point_multiply = k*P, point_add, uncompress_coords = lift_x, the bn_*
+ * modular arithmetic, sha256). We deliberately do NOT vendor secp256k1-zkp: its
+ * zkp_bip340.c pulls the entire secp256k1-zkp library (precomputed tables and
+ * all), a far larger and riskier surface than composing the ops we already
+ * audit. Every path is pinned to the OFFICIAL BIP-340 test vectors headless
+ * (tools/coin-kat.py), including the INVALID-signature cases, and a CoinXT
+ * signature must also verify in an independent library before VERIFY -> fact.
+ *
+ * Determinism: BIP-340 signing is a pure function of (seckey, msg, aux_rand).
+ * aux_rand is a CALLER-supplied OPTIONAL 32-byte buffer (NULL -> 32 zero bytes,
+ * BIP-340's fully-defined default), so no shim RNG feeds the output and every
+ * signature stays KAT-pinned. (trezor's scalar/point multiply still call
+ * random32() for internal Jacobian blinding only; that never changes the
+ * result, exactly as for ECDSA.) */
+
+/* tagged hash = SHA256(SHA256(tag) || SHA256(tag) || msg), BIP-340 section 3.
+ * The doubled 32-byte tag hash domain-separates each of the three hashes. */
+static void cnx_tagged_hash(const char *tag, size_t taglen,
+                            const unsigned char *msg, size_t msglen,
+                            unsigned char *out32) {
+  unsigned char th[32];
+  SHA256_CTX ctx;
+  sha256_Raw((const uint8_t *)tag, taglen, th);
+  sha256_Init(&ctx);
+  sha256_Update(&ctx, th, 32);
+  sha256_Update(&ctx, th, 32);
+  sha256_Update(&ctx, msg, msglen);
+  sha256_Final(&ctx, out32);
+}
+
+/* The BIP-340 x-only public key is x(d*G): the 32-byte big-endian x-coordinate,
+ * independent of the point's y parity (negating the point leaves x unchanged).
+ * We reuse the compressed pubkey and drop its 02/03 prefix. */
+int cnx_xonly_from_seckey(const unsigned char *sk32, unsigned char *out32) {
+  unsigned char pub33[33];
+  if (sk32 == NULL || out32 == NULL) return CNX_ERR_NULL;
+  if (cnx_seckey_verify(sk32) != CNX_OK) return CNX_ERR_BADKEY;
+  if (ecdsa_get_public_key33(&secp256k1, sk32, pub33) != 0)
+    return CNX_ERR_BADKEY;
+  memcpy(out32, pub33 + 1, 32);
+  memzero(pub33, sizeof(pub33));
+  return CNX_OK;
+}
+
+/* BIP-340 Sign(sk, m, a). sk32 is the 32-byte secret (in [1, n-1]); msg32 the
+ * 32-byte message; aux32 the optional 32-byte auxiliary randomness (NULL -> 32
+ * zero bytes). out_sig64 = bytes(R) || bytes((k + e*d) mod n). Follows the
+ * BIP-340 reference pseudocode step for step; the bn_* discipline mirrors
+ * trezor's own tc_ecdsa_sign_digest. */
+int cnx_schnorr_sign(const unsigned char *sk32, const unsigned char *msg32,
+                     const unsigned char *aux32, unsigned char *out_sig64) {
+  unsigned char aux_default[32] = {0};
+  unsigned char d_bytes[32], p_x[32], t[32], rnd[32], r_x[32], e_bytes[32];
+  unsigned char aux_hash[32], buf[96];
+  bignum256 d, k, e, ed;
+  curve_point P, R;
+  const bignum256 *order = &secp256k1.order;
+  int i, rc = CNX_ERR_INTERNAL;
+  if (sk32 == NULL || msg32 == NULL || out_sig64 == NULL) return CNX_ERR_NULL;
+  if (aux32 == NULL) aux32 = aux_default;
+  if (cnx_seckey_verify(sk32) != CNX_OK) return CNX_ERR_BADKEY;
+
+  /* d' = int(sk) in [1, n-1] (verified). P = d'*G; bytes(P) = x(P). */
+  bn_read_be(sk32, &d);
+  if (scalar_multiply(&secp256k1, &d, &P) != 0) goto done;
+  bn_write_be(&P.x, p_x);
+  /* d = d' if P has even y, else n - d' */
+  if (bn_is_odd(&P.y)) bn_subtract(order, &d, &d);
+  bn_write_be(&d, d_bytes);
+
+  /* t = bytes(d) XOR hash_BIP0340/aux(a) */
+  cnx_tagged_hash("BIP0340/aux", 11, aux32, 32, aux_hash);
+  for (i = 0; i < 32; i++) t[i] = (unsigned char)(d_bytes[i] ^ aux_hash[i]);
+
+  /* rand = hash_BIP0340/nonce(t || bytes(P) || m); k' = int(rand) mod n != 0 */
+  memcpy(buf, t, 32);
+  memcpy(buf + 32, p_x, 32);
+  memcpy(buf + 64, msg32, 32);
+  cnx_tagged_hash("BIP0340/nonce", 13, buf, 96, rnd);
+  bn_read_be(rnd, &k);
+  bn_mod(&k, order);
+  if (bn_is_zero(&k)) goto done;
+
+  /* R = k'*G; k = k' if R has even y, else n - k'. bytes(R) = x(R). */
+  if (scalar_multiply(&secp256k1, &k, &R) != 0) goto done;
+  bn_write_be(&R.x, r_x);
+  if (bn_is_odd(&R.y)) bn_subtract(order, &k, &k);
+
+  /* e = int(hash_BIP0340/challenge(bytes(R) || bytes(P) || m)) mod n */
+  memcpy(buf, r_x, 32);
+  memcpy(buf + 32, p_x, 32);
+  memcpy(buf + 64, msg32, 32);
+  cnx_tagged_hash("BIP0340/challenge", 17, buf, 96, e_bytes);
+  bn_read_be(e_bytes, &e);
+  bn_mod(&e, order);
+
+  /* s = (k + e*d) mod n; sig = bytes(R) || bytes(s) */
+  ed = d;
+  bn_multiply(&e, &ed, order);  /* ed = e*d mod n */
+  bn_add(&k, &ed);              /* k = k + e*d */
+  bn_mod(&k, order);            /* mod n */
+  memcpy(out_sig64, r_x, 32);
+  bn_write_be(&k, out_sig64 + 32);
+  rc = CNX_OK;
+
+done:
+  memzero(&d, sizeof(d));
+  memzero(&k, sizeof(k));
+  memzero(&ed, sizeof(ed));
+  memzero(&P, sizeof(P));
+  memzero(&R, sizeof(R));
+  memzero(d_bytes, sizeof(d_bytes));
+  memzero(t, sizeof(t));
+  memzero(rnd, sizeof(rnd));
+  memzero(aux_hash, sizeof(aux_hash));
+  memzero(buf, sizeof(buf));
+  if (rc != CNX_OK) memzero(out_sig64, 64);
+  return rc;
+}
+
+/* BIP-340 Verify(pk, m, sig). pk32 is the 32-byte x-only pubkey; msg32 the
+ * 32-byte message; sig64 = r(32) || s(32). Returns CNX_OK iff the signature is
+ * valid, CNX_ERR_BADSIG otherwise (fail closed on any malformed field). */
+int cnx_schnorr_verify(const unsigned char *pk32, const unsigned char *msg32,
+                       const unsigned char *sig64) {
+  unsigned char buf[96], e_bytes[32];
+  bignum256 r, s, e;
+  curve_point P, sG, eP;
+  const bignum256 *order = &secp256k1.order;
+  const bignum256 *prime = &secp256k1.prime;
+  int ok = 0;
+  if (pk32 == NULL || msg32 == NULL || sig64 == NULL) return CNX_ERR_NULL;
+
+  /* P = lift_x(int(pk)): x < p, and (x, even y) must be on the curve. */
+  bn_read_be(pk32, &P.x);
+  if (!bn_is_less(&P.x, prime)) return CNX_ERR_BADSIG;
+  uncompress_coords(&secp256k1, 0x02 /* want even y */, &P.x, &P.y);
+  if (!ecdsa_validate_pubkey(&secp256k1, &P)) return CNX_ERR_BADSIG;
+
+  /* r = int(sig[0:32]) < p; s = int(sig[32:64]) < n */
+  bn_read_be(sig64, &r);
+  bn_read_be(sig64 + 32, &s);
+  if (!bn_is_less(&r, prime) || !bn_is_less(&s, order)) return CNX_ERR_BADSIG;
+
+  /* e = int(hash_BIP0340/challenge(bytes(r) || bytes(P) || m)) mod n */
+  memcpy(buf, sig64, 32);        /* bytes(r) is sig[0:32] verbatim */
+  memcpy(buf + 32, pk32, 32);    /* bytes(P) is the x-only pubkey  */
+  memcpy(buf + 64, msg32, 32);
+  cnx_tagged_hash("BIP0340/challenge", 17, buf, 96, e_bytes);
+  bn_read_be(e_bytes, &e);
+  bn_mod(&e, order);
+
+  /* R = s*G - e*P (negate e*P by flipping its y, then add). */
+  if (scalar_multiply(&secp256k1, &s, &sG) != 0) return CNX_ERR_INTERNAL;
+  if (point_multiply(&secp256k1, &e, &P, &eP) != 0) return CNX_ERR_INTERNAL;
+  bn_subtract(prime, &eP.y, &eP.y);  /* -eP */
+  point_add(&secp256k1, &eP, &sG);   /* sG = -eP + sG = s*G - e*P = R */
+
+  /* accept iff R is finite, has even y, and x(R) == r */
+  ok = !point_is_infinity(&sG) && !bn_is_odd(&sG.y) && bn_is_equal(&sG.x, &r);
+  return ok ? CNX_OK : CNX_ERR_BADSIG;
+}
+
+/* BIP-341 Taproot output key for a KEY-PATH-ONLY output (no script tree):
+ * Q = P + int(hash_TapTweak(bytes(P)))*G, where P = lift_x(xonly_internal). The
+ * output is x(Q), the 32-byte witness-v1 program the script layer wraps in a
+ * Bech32m bc1p address. Like BIP-340, this transcribes a PUBLIC scheme over the
+ * vendored primitives; it is pinned to the official BIP-86 vectors headless.
+ * (A script-path Taproot would tweak by hash(P || merkle_root); CoinXT exposes
+ * the common single-key case, and documents the boundary.) */
+int cnx_taproot_tweak_pubkey(const unsigned char *xonly32, unsigned char *out32) {
+  unsigned char t_bytes[32];
+  bignum256 t;
+  curve_point P, tG;
+  if (xonly32 == NULL || out32 == NULL) return CNX_ERR_NULL;
+  /* P = lift_x(xonly): x < p and (x, even y) on the curve */
+  bn_read_be(xonly32, &P.x);
+  if (!bn_is_less(&P.x, &secp256k1.prime)) return CNX_ERR_BADKEY;
+  uncompress_coords(&secp256k1, 0x02 /* even y */, &P.x, &P.y);
+  if (!ecdsa_validate_pubkey(&secp256k1, &P)) return CNX_ERR_BADKEY;
+  /* t = int(hash_TapTweak(xonly)); must be a valid scalar (< n) */
+  cnx_tagged_hash("TapTweak", 8, xonly32, 32, t_bytes);
+  bn_read_be(t_bytes, &t);
+  if (!bn_is_less(&t, &secp256k1.order)) return CNX_ERR_BADKEY;
+  /* Q = P + t*G; output x(Q) */
+  if (scalar_multiply(&secp256k1, &t, &tG) != 0) return CNX_ERR_INTERNAL;
+  point_add(&secp256k1, &tG, &P); /* P = tG + P = P + t*G = Q */
+  bn_write_be(&P.x, out32);
   return CNX_OK;
 }

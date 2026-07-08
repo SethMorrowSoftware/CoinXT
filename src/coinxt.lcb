@@ -58,7 +58,7 @@ metadata summary    is "Bitcoin and Ethereum cryptography for xTalk via trezor-c
 /* the .lcb and the shim ship as one unit; any skew means a stale binary and
    is caught by cxbCheckABI before a call could corrupt memory. Keep in step
    with CNX_ABI_VERSION in native/coinxt.c. */
-constant kAbiVersion is 2
+constant kAbiVersion is 3
 
 /* --------------------------------------------------------------------------
    Engine memory + Data bridges (resolve by NAME, so NO leading underscore).
@@ -91,6 +91,8 @@ foreign handler _cnx_ecdsa_sig_len() returns UIntSize binds to "c:coinxt>cnx_ecd
 foreign handler _cnx_recoverable_sig_len() returns UIntSize binds to "c:coinxt>cnx_recoverable_sig_len"
 foreign handler _cnx_digest_len() returns UIntSize binds to "c:coinxt>cnx_digest_len"
 foreign handler _cnx_ecdh_secret_len() returns UIntSize binds to "c:coinxt>cnx_ecdh_secret_len"
+foreign handler _cnx_hdnode_len() returns UIntSize binds to "c:coinxt>cnx_hdnode_len"
+foreign handler _cnx_chaincode_len() returns UIntSize binds to "c:coinxt>cnx_chaincode_len"
 
 foreign handler _cnx_keccak256(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_keccak256"
 foreign handler _cnx_sha3_256(in pIn as Pointer, in pInLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_sha3_256"
@@ -109,6 +111,23 @@ foreign handler _cnx_ecdsa_verify(in pPub as Pointer, in pPubLen as UIntSize, in
 foreign handler _cnx_ecdsa_sign_recoverable(in pSk as Pointer, in pHash as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdsa_sign_recoverable"
 foreign handler _cnx_ecdsa_recover(in pSig as Pointer, in pHash as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdsa_recover"
 foreign handler _cnx_ecdh(in pSk as Pointer, in pPub as Pointer, in pPubLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_ecdh"
+
+foreign handler _cnx_hdnode_from_seed(in pSeed as Pointer, in pSeedLen as UIntSize, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hdnode_from_seed"
+foreign handler _cnx_hdnode_derive(in pNode as Pointer, in pIndex as CInt, in pHardened as CInt, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hdnode_derive"
+foreign handler _cnx_hdnode_private_key(in pNode as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hdnode_private_key"
+foreign handler _cnx_hdnode_public_key(in pNode as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hdnode_public_key"
+foreign handler _cnx_hdnode_chaincode(in pNode as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_hdnode_chaincode"
+
+/* BIP-340 Schnorr. aux_rand is genuinely optional: an ABSENT aux crosses as a
+   NULL pointer through an `optional Pointer` (a plain Pointer rejects nothing),
+   which the shim treats as 32 zero bytes (BIP-340's fully-defined default). */
+foreign handler _cnx_xonly_from_seckey(in pSk as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_xonly_from_seckey"
+foreign handler _cnx_schnorr_sign(in pSk as Pointer, in pMsg as Pointer, in pAux as optional Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_schnorr_sign"
+foreign handler _cnx_schnorr_verify(in pPub as Pointer, in pMsg as Pointer, in pSig as Pointer) returns CInt binds to "c:coinxt>cnx_schnorr_verify"
+foreign handler _cnx_taproot_tweak_pubkey(in pXonly as Pointer, in pOut as Pointer) returns CInt binds to "c:coinxt>cnx_taproot_tweak_pubkey"
+foreign handler _cnx_xonly_len() returns UIntSize binds to "c:coinxt>cnx_xonly_len"
+foreign handler _cnx_schnorr_sig_len() returns UIntSize binds to "c:coinxt>cnx_schnorr_sig_len"
+
 foreign handler _cnx_wipe(in pBuf as Pointer, in pLen as UIntSize) returns CInt binds to "c:coinxt>cnx_wipe"
 
 /* a 1-byte module-lifetime block substituted for the byte pointer of an EMPTY
@@ -642,6 +661,264 @@ public handler cxbEcdh(in pSk as Data, in pPub as Data) returns Data
       cnxThrow(tRc, "ecdh")
    end if
    return cnxTakeSecret(tOut, tOutLen)
+end handler
+
+/* ---- HD (BIP-32) nodes -------------------------------------------------------
+   The node is a 73-byte opaque blob that CARRIES A PRIVATE KEY, so every node
+   in and out is treated as secret: out-blocks take the secret (wiped) path,
+   and the script layer clears its node variables when done. The blob layout
+   (depth||parent_fp||child||chaincode||priv) is documented so the script layer
+   can frame xprv/xpub without more native calls. */
+
+public handler cxbHdFromSeed(in pSeed as Data) returns Data
+   variable tRc as Integer
+   variable tSeedPtr as Pointer
+   variable tSeedLen as Integer
+   variable tOut as Pointer
+   variable tNodeLen as Integer
+   unsafe
+      put _cnx_hdnode_len() into tNodeLen
+   end unsafe
+   put cnxDataPtr(pSeed) into tSeedPtr
+   put cnxDataLen(pSeed) into tSeedLen
+   put cnxAlloc(tNodeLen) into tOut
+   unsafe
+      put _cnx_hdnode_from_seed(tSeedPtr, tSeedLen, tOut) into tRc
+      if tRc is not 0 then
+         _cnx_wipe(tOut, tNodeLen)
+      end if
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "hd from seed")
+   end if
+   return cnxTakeSecret(tOut, tNodeLen)
+end handler
+
+public handler cxbHdDerive(in pNode as Data, in pIndex as Integer, in pHardened as Boolean) returns Data
+   variable tRc as Integer
+   variable tNodePtr as Pointer
+   variable tOut as Pointer
+   variable tNodeLen as Integer
+   variable tFlag as Integer
+   unsafe
+      put _cnx_hdnode_len() into tNodeLen
+   end unsafe
+   cnxCheckLen(pNode, tNodeLen, "hd derive")
+   put 0 into tFlag
+   if pHardened then
+      put 1 into tFlag
+   end if
+   put cnxDataPtr(pNode) into tNodePtr
+   put cnxAlloc(tNodeLen) into tOut
+   unsafe
+      put _cnx_hdnode_derive(tNodePtr, pIndex, tFlag, tOut) into tRc
+      if tRc is not 0 then
+         _cnx_wipe(tOut, tNodeLen)
+      end if
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "hd derive")
+   end if
+   return cnxTakeSecret(tOut, tNodeLen)
+end handler
+
+public handler cxbHdPrivateKey(in pNode as Data) returns Data
+   variable tRc as Integer
+   variable tNodePtr as Pointer
+   variable tOut as Pointer
+   variable tOutLen as Integer
+   variable tNodeLen as Integer
+   unsafe
+      put _cnx_hdnode_len() into tNodeLen
+      put _cnx_seckey_len() into tOutLen
+   end unsafe
+   cnxCheckLen(pNode, tNodeLen, "hd private key")
+   put cnxDataPtr(pNode) into tNodePtr
+   put cnxAlloc(tOutLen) into tOut
+   unsafe
+      put _cnx_hdnode_private_key(tNodePtr, tOut) into tRc
+      if tRc is not 0 then
+         _cnx_wipe(tOut, tOutLen)
+      end if
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "hd private key")
+   end if
+   return cnxTakeSecret(tOut, tOutLen)
+end handler
+
+public handler cxbHdPublicKey(in pNode as Data) returns Data
+   variable tRc as Integer
+   variable tNodePtr as Pointer
+   variable tOut as Pointer
+   variable tOutLen as Integer
+   variable tNodeLen as Integer
+   unsafe
+      put _cnx_hdnode_len() into tNodeLen
+      put _cnx_pubkey_len_compressed() into tOutLen
+   end unsafe
+   cnxCheckLen(pNode, tNodeLen, "hd public key")
+   put cnxDataPtr(pNode) into tNodePtr
+   put cnxAlloc(tOutLen) into tOut
+   unsafe
+      put _cnx_hdnode_public_key(tNodePtr, tOut) into tRc
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "hd public key")
+   end if
+   return cnxTake(tOut, tOutLen)
+end handler
+
+public handler cxbHdChainCode(in pNode as Data) returns Data
+   variable tRc as Integer
+   variable tNodePtr as Pointer
+   variable tOut as Pointer
+   variable tOutLen as Integer
+   variable tNodeLen as Integer
+   unsafe
+      put _cnx_hdnode_len() into tNodeLen
+      put _cnx_chaincode_len() into tOutLen
+   end unsafe
+   cnxCheckLen(pNode, tNodeLen, "hd chain code")
+   put cnxDataPtr(pNode) into tNodePtr
+   put cnxAlloc(tOutLen) into tOut
+   unsafe
+      put _cnx_hdnode_chaincode(tNodePtr, tOut) into tRc
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "hd chain code")
+   end if
+   return cnxTake(tOut, tOutLen)
+end handler
+
+/* ---- Schnorr / BIP-340 (Taproot) -------------------------------------------
+   The x-only pubkey and the signature are PUBLIC values (cnxTake, not the
+   secret path); the seckey input is secret and the script layer clears it.
+   The message is a 32-byte digest, exactly as for ECDSA: CoinXT signs what the
+   app hands it, never a preimage it builds. */
+
+public handler cxbXonlyFromSeckey(in pSk as Data) returns Data
+   variable tRc as Integer
+   variable tSkPtr as Pointer
+   variable tOut as Pointer
+   variable tSkLen as Integer
+   variable tOutLen as Integer
+   unsafe
+      put _cnx_seckey_len() into tSkLen
+      put _cnx_xonly_len() into tOutLen
+   end unsafe
+   cnxCheckLen(pSk, tSkLen, "xonly pubkey")
+   put cnxDataPtr(pSk) into tSkPtr
+   put cnxAlloc(tOutLen) into tOut
+   unsafe
+      put _cnx_xonly_from_seckey(tSkPtr, tOut) into tRc
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "xonly pubkey")
+   end if
+   return cnxTake(tOut, tOutLen)
+end handler
+
+/* aux_rand is optional: an EMPTY Data passes a NULL pointer (32 zero bytes in
+   the shim); a non-empty aux must be exactly 32 bytes. */
+public handler cxbSchnorrSign(in pSk as Data, in pMsg as Data, in pAux as Data) returns Data
+   variable tRc as Integer
+   variable tSkPtr as Pointer
+   variable tMsgPtr as Pointer
+   variable tAuxPtr as optional Pointer
+   variable tOut as Pointer
+   variable tSkLen as Integer
+   variable tMsgLen as Integer
+   variable tOutLen as Integer
+   unsafe
+      put _cnx_seckey_len() into tSkLen
+      put _cnx_digest_len() into tMsgLen
+      put _cnx_schnorr_sig_len() into tOutLen
+   end unsafe
+   cnxCheckLen(pSk, tSkLen, "schnorr sign")
+   cnxCheckLen(pMsg, tMsgLen, "schnorr sign")
+   if cnxDataLen(pAux) is 0 then
+      put nothing into tAuxPtr
+   else
+      cnxCheckLen(pAux, tMsgLen, "schnorr sign aux")
+      put cnxDataPtr(pAux) into tAuxPtr
+   end if
+   put cnxDataPtr(pSk) into tSkPtr
+   put cnxDataPtr(pMsg) into tMsgPtr
+   put cnxAlloc(tOutLen) into tOut
+   unsafe
+      put _cnx_schnorr_sign(tSkPtr, tMsgPtr, tAuxPtr, tOut) into tRc
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "schnorr sign")
+   end if
+   return cnxTake(tOut, tOutLen)
+end handler
+
+/* true only for a signature that verifies; every malformed input is false */
+public handler cxbSchnorrVerify(in pPub as Data, in pMsg as Data, in pSig as Data) returns Boolean
+   variable tRc as Integer
+   variable tPubPtr as Pointer
+   variable tMsgPtr as Pointer
+   variable tSigPtr as Pointer
+   variable tPubLen as Integer
+   variable tMsgLen as Integer
+   variable tSigLen as Integer
+   unsafe
+      put _cnx_xonly_len() into tPubLen
+      put _cnx_digest_len() into tMsgLen
+      put _cnx_schnorr_sig_len() into tSigLen
+   end unsafe
+   if cnxDataLen(pPub) is not tPubLen then
+      return false
+   end if
+   if cnxDataLen(pMsg) is not tMsgLen then
+      return false
+   end if
+   if cnxDataLen(pSig) is not tSigLen then
+      return false
+   end if
+   put cnxDataPtr(pPub) into tPubPtr
+   put cnxDataPtr(pMsg) into tMsgPtr
+   put cnxDataPtr(pSig) into tSigPtr
+   unsafe
+      put _cnx_schnorr_verify(tPubPtr, tMsgPtr, tSigPtr) into tRc
+   end unsafe
+   if tRc is 0 then
+      return true
+   end if
+   return false
+end handler
+
+/* BIP-341 Taproot key-path output key: tweak a 32-byte x-only INTERNAL key to
+   the 32-byte witness-v1 OUTPUT key (both public; the script layer Bech32m-
+   wraps the result into a bc1p address). */
+public handler cxbTaprootTweak(in pXonly as Data) returns Data
+   variable tRc as Integer
+   variable tInPtr as Pointer
+   variable tOut as Pointer
+   variable tLen as Integer
+   unsafe
+      put _cnx_xonly_len() into tLen
+   end unsafe
+   cnxCheckLen(pXonly, tLen, "taproot tweak")
+   put cnxDataPtr(pXonly) into tInPtr
+   put cnxAlloc(tLen) into tOut
+   unsafe
+      put _cnx_taproot_tweak_pubkey(tInPtr, tOut) into tRc
+   end unsafe
+   if tRc is not 0 then
+      cnxFree(tOut)
+      cnxThrow(tRc, "taproot tweak")
+   end if
+   return cnxTake(tOut, tLen)
 end handler
 
 end library

@@ -12,11 +12,12 @@
 -- hand-rolled signer, these primitives fail closed.
 --
 -- Tabs: Keys (make + validate a secp256k1 key, derive its public key),
--- Addresses (Bitcoin legacy + SegWit, Ethereum with EIP-55), Sign & Verify
--- (deterministic RFC 6979 ECDSA + tamper rejection), Ethereum (recoverable
--- signatures + ecrecover), Shared Secret (ECDH), Hashes (the Keccak-256 vs
--- SHA3-256 footgun, side by side, plus SHA-2, RIPEMD-160, hash160/hash256),
--- Seed (a BIP-39 mnemonic -> the 64-byte master seed), About (the pitch +
+-- Addresses (Bitcoin legacy + SegWit + Taproot, Ethereum with EIP-55), Sign &
+-- Verify (deterministic RFC 6979 ECDSA + tamper rejection), Ethereum
+-- (recoverable signatures + ecrecover), Shared Secret (ECDH), Hashes (the
+-- Keccak-256 vs SHA3-256 footgun, side by side, plus SHA-2, RIPEMD-160,
+-- hash160/hash256), Wallet (a BIP-39 phrase -> BIP-32 derivation -> account
+-- xpub + the first SegWit and Taproot receiving addresses), About (the pitch +
 -- a one-click self-test over every primitive).
 --
 -- KEYS IN THIS DEMO ARE PUBLIC TEST KEYS. The demo key derives from the
@@ -377,7 +378,7 @@ on buildUI
    cxdButton "ui:tabEth", "345,84,448,114", "Ethereum", "idle"
    cxdButton "ui:tabEcdh", "452,84,555,114", "ECDH", "idle"
    cxdButton "ui:tabHash", "559,84,662,114", "Hashes", "idle"
-   cxdButton "ui:tabSeed", "666,84,769,114", "Seed", "idle"
+   cxdButton "ui:tabSeed", "666,84,769,114", "Wallet", "idle"
    cxdButton "ui:tabAbout", "773,84,876,114", "About", "idle"
 
    -- content panel + footer
@@ -432,20 +433,20 @@ on buildKeysTab
    cxdButton "keys:copy", "480,222,600,252", "Copy pubkey", "idle"
    cxdCap "keys:outLabel", "48,266,852,286", "seckey (PUBLIC) / compressed pubkey (02|03) / uncompressed pubkey (04):", kClrInkMute
    cxdMono "keys:out", "48,288,852,452"
-   cxdCap "keys:note", "48,462,852,502", "The compressed pubkey feeds a Bitcoin address; the uncompressed one (minus its 04 byte) feeds an Ethereum address. Open the Addresses tab to see all three.", kClrInkMute
+   cxdCap "keys:note", "48,462,852,502", "The compressed pubkey feeds the Bitcoin addresses; the uncompressed one (minus its 04 byte) feeds an Ethereum address. Open the Addresses tab to see all four.", kClrInkMute
    cxdLabel "keys:status", "48,566,852,600", "No key yet - click a button above.", kClrInkSoft, 12, "plain"
 end buildKeysTab
 
 -- ---- Addresses tab
 on buildAddrTab
    cxdHdr "addr:h", "48,138,852,166", "Real Bitcoin and Ethereum addresses from your key"
-   cxdCap "addr:p", "48,168,852,214", "The one public key becomes three addresses: a Bitcoin legacy address (Base58Check), a Bitcoin SegWit address (Bech32, bc1...), and an Ethereum address (Keccak-256 with the EIP-55 mixed-case checksum). All computed in script, pinned to the BIP-173 and EIP-55 test vectors.", kClrInkSoft
+   cxdCap "addr:p", "48,168,852,214", "The one public key becomes four addresses: a Bitcoin legacy (Base58Check), SegWit (Bech32, bc1q), and Taproot (Bech32m, bc1p, BIP-341 tweaked) address, plus an Ethereum address (Keccak-256 with the EIP-55 mixed-case checksum). All framed in script, pinned to the BIP-173/350, BIP-86 and EIP-55 test vectors.", kClrInkSoft
    cxdButton "addr:go", "48,222,236,252", "Derive addresses", "primary"
    cxdButton "addr:copyBtc", "248,222,428,252", "Copy SegWit (bc1)", "idle"
    cxdButton "addr:copyEth", "440,222,600,252", "Copy Ethereum", "eth"
-   cxdCap "addr:outLabel", "48,266,852,286", "P2PKH (legacy 1...) / P2WPKH (SegWit bc1...) / Ethereum (0x...):", kClrInkMute
+   cxdCap "addr:outLabel", "48,266,852,286", "P2PKH (1...) / P2WPKH (bc1q...) / P2TR (bc1p...) / Ethereum (0x...):", kClrInkMute
    cxdMono "addr:out", "48,288,852,452"
-   cxdCap "addr:note", "48,462,852,502", "The legacy and SegWit forms come from the COMPRESSED key; the Ethereum form comes from the UNCOMPRESSED key (its last 20 keccak bytes). One key, three chains-worth of addresses.", kClrInkMute
+   cxdCap "addr:note", "48,462,852,502", "Legacy, SegWit and Taproot come from the COMPRESSED key; the Ethereum form comes from the UNCOMPRESSED key (its last 20 keccak bytes). Taproot tweaks the key (Q = P + hash(P)*G) before encoding. One key, four chains-worth of addresses.", kClrInkMute
    cxdLabel "addr:status", "48,566,852,600", "Make a key on the Keys tab, then derive its addresses here.", kClrInkSoft, 12, "plain"
 end buildAddrTab
 
@@ -498,23 +499,23 @@ on buildHashTab
    cxdLabel "hash:status", "48,566,852,600", "Keccak-256 and SHA3-256 will look completely different - that is the point.", kClrInkSoft, 12, "plain"
 end buildHashTab
 
--- ---- Key Derivation tab
+-- ---- HD Wallet tab (BIP-39 phrase -> BIP-32 derivation -> real addresses)
 on buildSeedTab
-   cxdHdr "seed:h", "48,138,852,166", "Seed phrases: a wallet you can write down (BIP-39)"
-   cxdCap "seed:p", "48,168,852,222", "Twelve everyday words encode your entropy plus a checksum, so a single typo is caught. Those words, with an optional passphrase, run through PBKDF2-HMAC-SHA512 (2048 rounds) to make the 64-byte master seed a whole HD wallet derives from. Entropy comes from SodiumXT if it is loaded, otherwise a fixed DEMO value.", kClrInkSoft
-   cxdButton "seed:go", "48,230,236,260", "Generate a seed phrase", "primary"
+   cxdHdr "seed:h", "48,138,852,166", "A whole HD wallet, from twelve words (BIP-32/39/84/86)"
+   cxdCap "seed:p", "48,168,852,222", "Twelve words (entropy plus a checksum, so a typo is caught) become a 64-byte master seed via PBKDF2-HMAC-SHA512. From there CoinXT walks the BIP-32 tree to a real account: a watch-only xpub, and the first receiving addresses on the standard SegWit (m/84') and Taproot (m/86') paths. Entropy is SodiumXT's if loaded, else a fixed DEMO value.", kClrInkSoft
+   cxdButton "seed:go", "48,230,236,260", "Generate an HD wallet", "primary"
    cxdCap "seed:ppLabel", "252,238,404,258", "Passphrase (optional):", kClrInkMute
    cxdInput "seed:pp", "408,232,700,262", ""
-   cxdCap "seed:outLabel", "48,274,852,294", "mnemonic (12 words) / checksum / 64-byte master seed:", kClrInkMute
-   cxdMono "seed:out", "48,296,852,452"
-   cxdCap "seed:note", "48,462,852,502", "This 64-byte seed is the BIP-32 MASTER seed. Deriving the account keys at a path like m/44'/0'/0'/0/0 is the next step - it needs a native addition, because the child-key tweak is secp256k1 math that must be trezor-crypto's.", kClrInkMute
-   cxdLabel "seed:status", "48,566,852,600", "Click Generate to make a fresh BIP-39 seed phrase.", kClrInkSoft, 12, "plain"
+   cxdCap "seed:outLabel", "48,274,852,294", "mnemonic / master seed / account xpub / first SegWit + Taproot receiving addresses:", kClrInkMute
+   cxdMono "seed:out", "48,296,852,502"
+   cxdCap "seed:note", "48,510,852,552", "The xpub is watch-only: it derives receiving addresses but signs nothing. The SegWit address starts bc1q, the Taproot address bc1p (Bech32m). The BIP-32 child tweak is native (trezor-crypto secp256k1); the address framing is script, KAT-pinned.", kClrInkMute
+   cxdLabel "seed:status", "48,566,852,600", "Click Generate to make a fresh BIP-39 phrase and derive its wallet.", kClrInkSoft, 12, "plain"
 end buildSeedTab
 
 -- ---- About tab (pitch + embedded self-test)
 on buildAboutTab
    cxdHdr "about:h", "48,138,852,166", "CoinXT: Bitcoin and Ethereum primitives for xTalk"
-   cxdCap "about:exp", "48,168,852,300", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (RFC 6979, low-s), verify, recover a signer the Ethereum way, agree on an ECDH secret, and hash with SHA-2, SHA-3, Keccak-256 and RIPEMD-160 - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
+   cxdCap "about:exp", "48,168,852,300", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way, agree on an ECDH secret, derive a BIP-32/39 HD wallet, build legacy / SegWit / Taproot / Ethereum addresses, and hash with SHA-2, SHA-3, Keccak-256 and RIPEMD-160 - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
    cxdButton "about:selftest", "48,306,300,338", "Run the full self-test", "primary"
    cxdMono "about:out", "48,350,852,452"
    cxdLabel "about:status", "48,566,852,600", "Click Run the full self-test to check every primitive against a public vector.", kClrInkSoft, 12, "plain"
@@ -696,16 +697,18 @@ end handleAddr
 on doAddresses
    local tP2pkh
    local tP2wpkh
+   local tP2tr
    local tEth
    local tOut
    if haveKey("addr:status") is false then
       exit doAddresses
    end if
-   -- legacy and SegWit come from the compressed key; Ethereum from uncompressed
+   -- legacy / SegWit / Taproot come from the compressed key; Ethereum from uncompressed
    put cxBtcAddressP2PKH(sPub33, true) into tP2pkh
    put cxBtcAddressP2WPKH(sPub33, true) into tP2wpkh
+   put cxBtcAddressP2TR(sPub33, true) into tP2tr
    put cxEthAddress(sPub65) into tEth
-   if cxIsError(tP2pkh) or cxIsError(tP2wpkh) or cxIsError(tEth) then
+   if cxIsError(tP2pkh) or cxIsError(tP2wpkh) or cxIsError(tP2tr) or cxIsError(tEth) then
       cxdStatus "addr:status", "Address derivation failed; is the extension loaded?", "bad"
       exit doAddresses
    end if
@@ -713,9 +716,10 @@ on doAddresses
    put tEth into sAddrEth
    put "BTC legacy   (P2PKH)   " & tP2pkh & return into tOut
    put "BTC SegWit   (P2WPKH)  " & tP2wpkh & return after tOut
+   put "BTC Taproot  (P2TR)    " & tP2tr & return after tOut
    put "Ethereum     (EIP-55)  " & tEth after tOut
    put tOut into field "addr:out"
-   cxdStatus "addr:status", "Three addresses from one key - fund none of them (demo keys are public).", "ok"
+   cxdStatus "addr:status", "Four addresses from one key - fund none of them (demo keys are public).", "ok"
 end doAddresses
 
 -- ------------------------------------------------------------------ Sign tab actions
@@ -920,6 +924,9 @@ on doSeed
    local tSeed
    local tPass
    local tOut
+   local tMaster
+   local tAcct
+   local tLeaf
    -- 16 bytes of entropy: SodiumXT if present, else a fixed DEMO value (so a
    -- machine without SodiumXT still runs, loudly non-random)
    try
@@ -938,16 +945,46 @@ on doSeed
       cxdStatus "seed:status", tSeed, "bad"
       exit doSeed
    end if
-   put "mnemonic   " & tMnem & return & return into tOut
+   put "mnemonic   " & tMnem & return into tOut
    if cxMnemonicValidate(tMnem) then
       put "checksum   valid (a typo in any word would be caught)" & return after tOut
    else
       put "checksum   INVALID" & return after tOut
    end if
-   put "seed       " & cxdHex(tSeed) after tOut
+   put "seed       " & cxdHex(tSeed) & return & return after tOut
+   -- walk the BIP-32 tree from the master seed to a real account
+   put cxHdFromSeed(tSeed) into tMaster
+   if cxIsError(tMaster) then
+      cxdStatus "seed:status", tMaster, "bad"
+      exit doSeed
+   end if
+   -- watch-only account xpub (BIP-84 native SegWit account, m/84'/0'/0')
+   put cxHdDerivePath(tMaster, "m/84'/0'/0'") into tAcct
+   if not cxIsError(tAcct) then
+      put "acct xpub  " & cxXpub(tAcct, true) & return & \
+         "           (m/84'/0'/0' - watch-only, derives receiving keys only)" & return & return after tOut
+   end if
+   -- first receiving SegWit address (m/84'/0'/0'/0/0)
+   put cxHdDerivePath(tMaster, "m/84'/0'/0'/0/0") into tLeaf
+   if not cxIsError(tLeaf) then
+      put "segwit  #0 " & cxBtcAddressP2WPKH(cxHdPubkey(tLeaf), true) & \
+         "  (m/84'/0'/0'/0/0)" & return after tOut
+   end if
+   put empty into tLeaf
+   -- first receiving Taproot address (m/86'/0'/0'/0/0)
+   put cxHdDerivePath(tMaster, "m/86'/0'/0'/0/0") into tLeaf
+   if not cxIsError(tLeaf) then
+      put "taproot #0 " & cxBtcAddressP2TR(cxHdPubkey(tLeaf), true) & \
+         "  (m/86'/0'/0'/0/0)" after tOut
+   end if
    put tOut into field "seed:out"
+   -- clear every secret we touched (nodes carry private keys)
    put empty into tEntropy
-   cxdStatus "seed:status", "Twelve words to a 64-byte master seed. Write real ones on paper; never a demo one.", "ok"
+   put empty into tSeed
+   put empty into tMaster
+   put empty into tAcct
+   put empty into tLeaf
+   cxdStatus "seed:status", "Twelve words to a full HD wallet: master seed, account xpub, and the first SegWit + Taproot addresses. Demo keys are PUBLIC - never fund them.", "ok"
 end doSeed
 
 -- ------------------------------------------------------------------ About tab: embedded self-test
@@ -962,6 +999,7 @@ on doSelfTest
    local tHash
    local tSig
    local tMnem
+   local tNode
    put 0 into sTPass
    put 0 into sTFail
    put "CoinXT self-test" & return & return into sTLog
@@ -1028,6 +1066,30 @@ on doSelfTest
    checkInto (cxdHex(cxMnemonicToSeed(tMnem, "TREZOR")) is \
       "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"), \
       "mnemonic + TREZOR makes the pinned 64-byte seed"
+
+   -- BIP-32 HD (test vector 1 master xprv/xpub)
+   put cxHdFromSeed(cxdBin("000102030405060708090a0b0c0d0e0f")) into tNode
+   checkInto (cxXprv(tNode, true) is \
+      "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi"), \
+      "BIP-32 master xprv matches test vector 1"
+   checkInto (cxXpub(tNode, true) is \
+      "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8"), \
+      "BIP-32 master xpub matches test vector 1"
+   put empty into tNode
+
+   -- BIP-340 Schnorr (test vector 0) + Taproot address (BIP-86)
+   put cxdBin("0000000000000000000000000000000000000000000000000000000000000003") into tSk
+   checkInto (cxdHex(cxXonlyFromSeckey(tSk)) is \
+      "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"), \
+      "BIP-340 x-only pubkey matches test vector 0"
+   put cxSchnorrSign(tSk, cxdBin("0000000000000000000000000000000000000000000000000000000000000000"), \
+      cxdBin("0000000000000000000000000000000000000000000000000000000000000000")) into tSig
+   checkInto (cxdHex(tSig) is \
+      "e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce2dca821525f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0"), \
+      "BIP-340 signature matches test vector 0"
+   checkInto (cxBtcAddressP2TR(cxdBin("cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115"), true) is \
+      "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"), \
+      "P2TR(internal key) is the BIP-86 bc1p address"
 
    put sTLog into field "about:out"
    if sTFail is 0 then

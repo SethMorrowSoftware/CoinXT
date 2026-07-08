@@ -42,7 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 NATIVE = os.path.normpath(os.path.join(HERE, "..", "native"))
 VENDOR = os.path.join(NATIVE, "vendor")
 
-ABI_EXPECTED = 2
+ABI_EXPECTED = 3
 
 # The independent external implementation for the curve cross-checks. Optional:
 # sections that need it skip cleanly when it is absent.
@@ -153,6 +153,17 @@ def load(out_path):
         "cnx_ecdsa_sign_recoverable": [buf, buf, buf],
         "cnx_ecdsa_recover": [buf, buf, buf],
         "cnx_ecdh": [buf, buf, size, buf],
+        # HD (BIP-32) nodes
+        "cnx_hdnode_from_seed": [buf, size, buf],
+        "cnx_hdnode_derive": [buf, cint, cint, buf],
+        "cnx_hdnode_private_key": [buf, buf],
+        "cnx_hdnode_public_key": [buf, buf],
+        "cnx_hdnode_chaincode": [buf, buf],
+        # Schnorr / BIP-340 (aux is an optional pointer; NULL -> zero bytes)
+        "cnx_xonly_from_seckey": [buf, buf],
+        "cnx_schnorr_sign": [buf, buf, buf, buf],
+        "cnx_schnorr_verify": [buf, buf, buf],
+        "cnx_taproot_tweak_pubkey": [buf, buf],
         # hygiene
         "cnx_wipe": [buf, size],
     }
@@ -656,6 +667,340 @@ def run_bip39_checks(lib, kat):
                   to_seed(exp_mnem, "TREZOR") == exp_seed)
 
 
+# ---------------------------------------------------------------------------
+# BIP-32 HD nodes (phase 4b, native). The shim's cnx_hdnode_* transcribe
+# trezor's secp256k1 CKD; this pins them to the OFFICIAL BIP-32 test vectors by
+# reconstructing each node's xprv (Base58Check of the node blob + version) and
+# comparing to the published string - depth, parent fingerprint, child number,
+# chain code, and private key all at once.
+BIP32_VECTOR1_SEED = "000102030405060708090a0b0c0d0e0f"
+# mainnet extended-key version bytes (BIP-32), the same two cxXprv/cxXpub emit.
+XPRV_VERSION = bytes.fromhex("0488ade4")
+XPUB_VERSION = bytes.fromhex("0488b21e")
+# (path, official xprv, official xpub). The path is applied step by step; each
+# level pins BOTH extended keys, so the reconstruction below locks the exact
+# strings cxXprv / cxXpub must emit on-engine.
+BIP32_VECTOR1 = [
+    ([],
+     "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi",
+     "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8"),
+    ([(0, True)],
+     "xprv9uHRZZhk6KAJC1avXpDAp4MDc3sQKNxDiPvvkX8Br5ngLNv1TxvUxt4cV1rGL5hj6KCesnDYUhd7oWgT11eZG7XnxHrnYeSvkzY7d2bhkJ7",
+     "xpub68Gmy5EdvgibQVfPdqkBBCHxA5htiqg55crXYuXoQRKfDBFA1WEjWgP6LHhwBZeNK1VTsfTFUHCdrfp1bgwQ9xv5ski8PX9rL2dZXvgGDnw"),
+    ([(0, True), (1, False)],
+     "xprv9wTYmMFdV23N2TdNG573QoEsfRrWKQgWeibmLntzniatZvR9BmLnvSxqu53Kw1UmYPxLgboyZQaXwTCg8MSY3H2EU4pWcQDnRnrVA1xe8fs",
+     "xpub6ASuArnXKPbfEwhqN6e3mwBcDTgzisQN1wXN9BJcM47sSikHjJf3UFHKkNAWbWMiGj7Wf5uMash7SyYq527Hqck2AxYysAA7xmALppuCkwQ"),
+    ([(0, True), (1, False), (2, True)],
+     "xprv9z4pot5VBttmtdRTWfWQmoH1taj2axGVzFqSb8C9xaxKymcFzXBDptWmT7FwuEzG3ryjH4ktypQSAewRiNMjANTtpgP4mLTj34bhnZX7UiM",
+     "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5"),
+    ([(0, True), (1, False), (2, True), (2, False)],
+     "xprvA2JDeKCSNNZky6uBCviVfJSKyQ1mDYahRjijr5idH2WwLsEd4Hsb2Tyh8RfQMuPh7f7RtyzTtdrbdqqsunu5Mm3wDvUAKRHSC34sJ7in334",
+     "xpub6FHa3pjLCk84BayeJxFW2SP4XRrFd1JYnxeLeU8EqN3vDfZmbqBqaGJAyiLjTAwm6ZLRQUMv1ZACTj37sR62cfN7fe5JnJ7dh8zL4fiyLHV"),
+    ([(0, True), (1, False), (2, True), (2, False), (1000000000, False)],
+     "xprvA41z7zogVVwxVSgdKUHDy1SKmdb533PjDz7J6N6mV6uS3ze1ai8FHa8kmHScGpWmj4WggLyQjgPie1rFSruoUihUZREPSL39UNdE3BBDu76",
+     "xpub6H1LXWLaKsWFhvm6RVpEL9P4KfRZSW7abD2ttkWP3SSQvnyA8FSVqNTEcYFgJS2UaFcxupHiYkro49S8yGasTvXEYBVPamhGW6cFJodrTHy"),
+]
+
+
+def _b58decode(s):
+    num = 0
+    for ch in s:
+        num = num * 58 + _B58.index(ch)
+    body = num.to_bytes((num.bit_length() + 7) // 8, "big")
+    pad = len(s) - len(s.lstrip("1"))
+    return b"\x00" * pad + body
+
+
+def _b58check_body(body):
+    # Base58Check over a body whose version prefix is ALREADY prepended (xprv/
+    # xpub use a 4-byte version, not the 1-byte _b58check takes). This is the
+    # exact framing cxXprv / cxXpub perform: append the 4-byte double-SHA-256
+    # tail, then Base58 the whole thing.
+    data = body + _dsha(body)[:4]
+    n_zero = len(data) - len(data.lstrip(b"\x00"))
+    num = int.from_bytes(data, "big")
+    out = ""
+    while num:
+        num, rem = divmod(num, 58)
+        out = _B58[rem] + out
+    return "1" * n_zero + out
+
+
+def run_hd_checks(lib, kat):
+    seed = bytes.fromhex(BIP32_VECTOR1_SEED)
+    for path, xprv, xpub in BIP32_VECTOR1:
+        node = ctypes.create_string_buffer(73)
+        rc = lib.cnx_hdnode_from_seed(seed, len(seed), node)
+        if rc != 0:
+            kat.check("BIP-32 from_seed", False, f"rc={rc}")
+            return
+        for index, hardened in path:
+            child = ctypes.create_string_buffer(73)
+            rc = lib.cnx_hdnode_derive(node.raw, index, 1 if hardened else 0, child)
+            if rc != 0:
+                kat.check(f"BIP-32 derive index {index}", False, f"rc={rc}")
+                return
+            node = child
+        # official xprv body = version(4)|depth(1)|fp(4)|child(4)|cc(32)|00|priv(32)|checksum(4)
+        body = _b58decode(xprv)[4:-4]   # depth..priv, 74 bytes
+        blob = node.raw                  # depth|fp|child|cc|priv, 73 bytes
+        label = "m" + "".join(f"/{i}{'H' if h else ''}" for i, h in path)
+        ok = (blob[0:41] == body[0:41] and body[41] == 0
+              and blob[41:73] == body[42:74])
+        kat.check(f"BIP-32 vector 1 {label} (blob fields)", ok)
+        # Reconstruct the full xprv/xpub the way cxXprv/cxXpub do, from ONLY the
+        # blob fields + the shim's own pubkey derivation, and lock to the
+        # published strings. blob[0:41] = depth|fp|child|cc; blob[41:73] = priv.
+        pub = pubkey(lib, blob[41:73], True)
+        built_xprv = _b58check_body(XPRV_VERSION + blob[0:41] + b"\x00" + blob[41:73])
+        built_xpub = _b58check_body(XPUB_VERSION + blob[0:41] + pub)
+        kat.check(f"BIP-32 vector 1 {label} xprv string", built_xprv == xprv)
+        kat.check(f"BIP-32 vector 1 {label} xpub string", built_xpub == xpub)
+    # a public-key accessor round trip against the shim's own pubkey derivation
+    node = ctypes.create_string_buffer(73)
+    lib.cnx_hdnode_from_seed(seed, len(seed), node)
+    priv = ctypes.create_string_buffer(32)
+    pub = ctypes.create_string_buffer(33)
+    lib.cnx_hdnode_private_key(node.raw, priv)
+    lib.cnx_hdnode_public_key(node.raw, pub)
+    kat.check("hdnode pubkey == pubkey(hdnode privkey)",
+              pub.raw == pubkey(lib, priv.raw, True))
+
+
+# ---------------------------------------------------------------------------
+# Schnorr / BIP-340 (Taproot, native). The shim's cnx_schnorr_* transcribe the
+# BIP-340 SCHEME over trezor's secp256k1 primitives. This section pins them to
+# the OFFICIAL BIP-340 test vectors, and - the family gold standard for a
+# signing path - cross-checks every CoinXT signature against an INDEPENDENT
+# reference implementation (the BIP-340 reference pseudocode, below). CoinXT
+# signs a fixed 32-byte message (like its ECDSA: sign only the exact digest;
+# Taproot always signs a 32-byte sighash), so only the 32-byte-message vectors
+# (0-14) are in scope; the variable-length vectors (15-18) are out of scope by
+# design and intentionally not driven here.
+
+# secp256k1 domain parameters (for the independent reference only).
+_SECP_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+_SECP_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_SECP_G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+           0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+
+def _sn_taghash(tag, msg):
+    th = hashlib.sha256(tag.encode()).digest()
+    return hashlib.sha256(th + th + msg).digest()
+
+
+def _sn_add(P1, P2):
+    if P1 is None:
+        return P2
+    if P2 is None:
+        return P1
+    if P1[0] == P2[0] and (P1[1] != P2[1]):
+        return None
+    if P1 == P2:
+        lam = (3 * P1[0] * P1[0] * pow(2 * P1[1], _SECP_P - 2, _SECP_P)) % _SECP_P
+    else:
+        lam = ((P2[1] - P1[1]) * pow(P2[0] - P1[0], _SECP_P - 2, _SECP_P)) % _SECP_P
+    x3 = (lam * lam - P1[0] - P2[0]) % _SECP_P
+    return (x3, (lam * (P1[0] - x3) - P1[1]) % _SECP_P)
+
+
+def _sn_mul(P, k):
+    R = None
+    for i in range(256):
+        if (k >> i) & 1:
+            R = _sn_add(R, P)
+        P = _sn_add(P, P)
+    return R
+
+
+def _sn_lift_x(x):
+    if x >= _SECP_P:
+        return None
+    c = (pow(x, 3, _SECP_P) + 7) % _SECP_P
+    y = pow(c, (_SECP_P + 1) // 4, _SECP_P)
+    if pow(y, 2, _SECP_P) != c:
+        return None
+    return (x, y if y % 2 == 0 else _SECP_P - y)
+
+
+def _sn_ref_sign(msg, seckey, aux):
+    d0 = int.from_bytes(seckey, "big")
+    assert 1 <= d0 <= _SECP_N - 1
+    P = _sn_mul(_SECP_G, d0)
+    d = d0 if P[1] % 2 == 0 else _SECP_N - d0
+    t = bytes(a ^ b for a, b in zip(d.to_bytes(32, "big"), _sn_taghash("BIP0340/aux", aux)))
+    k0 = int.from_bytes(_sn_taghash("BIP0340/nonce", t + P[0].to_bytes(32, "big") + msg), "big") % _SECP_N
+    assert k0 != 0
+    R = _sn_mul(_SECP_G, k0)
+    k = k0 if R[1] % 2 == 0 else _SECP_N - k0
+    e = int.from_bytes(_sn_taghash("BIP0340/challenge",
+                                   R[0].to_bytes(32, "big") + P[0].to_bytes(32, "big") + msg), "big") % _SECP_N
+    return R[0].to_bytes(32, "big") + ((k + e * d) % _SECP_N).to_bytes(32, "big")
+
+
+def _sn_ref_verify(msg, pk, sig):
+    P = _sn_lift_x(int.from_bytes(pk, "big"))
+    r = int.from_bytes(sig[0:32], "big")
+    s = int.from_bytes(sig[32:64], "big")
+    if P is None or r >= _SECP_P or s >= _SECP_N:
+        return False
+    e = int.from_bytes(_sn_taghash("BIP0340/challenge", sig[0:32] + pk + msg), "big") % _SECP_N
+    R = _sn_add(_sn_mul(_SECP_G, s), _sn_mul(P, _SECP_N - e))
+    return R is not None and R[1] % 2 == 0 and R[0] == r
+
+
+# Official BIP-340 test vectors, rows 0-14 (32-byte messages only), copied
+# verbatim from bitcoin/bips bip-0340/test-vectors.csv. Each tuple is
+# (index, seckey|None, x-only pubkey, aux_rand|None, message, signature, valid).
+SCHNORR_VECTORS = [
+    (0, "0000000000000000000000000000000000000000000000000000000000000003", "F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9", "0000000000000000000000000000000000000000000000000000000000000000",
+     "0000000000000000000000000000000000000000000000000000000000000000",
+     "E907831F80848D1069A5371B402410364BDF1C5F8307B0084C55F1CE2DCA821525F66A4A85EA8B71E482A74F382D2CE5EBEEE8FDB2172F477DF4900D310536C0", True),
+    (1, "B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF", "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659", "0000000000000000000000000000000000000000000000000000000000000001",
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "6896BD60EEAE296DB48A229FF71DFE071BDE413E6D43F917DC8DCF8C78DE33418906D11AC976ABCCB20B091292BFF4EA897EFCB639EA871CFA95F6DE339E4B0A", True),
+    (2, "C90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B14E5C9", "DD308AFEC5777E13121FA72B9CC1B7CC0139715309B086C960E18FD969774EB8", "C87AA53824B4D7AE2EB035A2B5BBBCCC080E76CDC6D1692C4B0B62D798E6D906",
+     "7E2D58D8B3BCDF1ABADEC7829054F90DDA9805AAB56C77333024B9D0A508B75C",
+     "5831AAEED7B44BB74E5EAB94BA9D4294C49BCF2A60728D8B4C200F50DD313C1BAB745879A5AD954A72C45A91C3A51D3C7ADEA98D82F8481E0E1E03674A6F3FB7", True),
+    (3, "0B432B2677937381AEF05BB02A66ECD012773062CF3FA2549E44F58ED2401710", "25D1DFF95105F5253C4022F628A996AD3A0D95FBF21D468A1B33F8C160D8F517", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+     "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+     "7EB0509757E246F19449885651611CB965ECC1A187DD51B64FDA1EDC9637D5EC97582B9CB13DB3933705B32BA982AF5AF25FD78881EBB32771FC5922EFC66EA3", True),  # test fails if msg is reduced modulo p or n
+    (4, None, "D69C3509BB99E412E68B0FE8544E72837DFA30746D8BE2AA65975F29D22DC7B9", None,
+     "4DF3C3F68FCC83B27E9D42C90431A72499F17875C81A599B566C9889B9696703",
+     "00000000000000000000003B78CE563F89A0ED9414F5AA28AD0D96D6795F9C6376AFB1548AF603B3EB45C9F8207DEE1060CB71C04E80F593060B07D28308D7F4", True),
+    (5, None, "EEFDEA4CDB677750A420FEE807EACF21EB9898AE79B9768766E4FAA04A2D4A34", None,
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "6CFF5C3BA86C69EA4B7376F31A9BCB4F74C1976089B2D9963DA2E5543E17776969E89B4C5564D00349106B8497785DD7D1D713A8AE82B32FA79D5F7FC407D39B", False),  # public key not on the curve
+    (6, None, "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659", None,
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "FFF97BD5755EEEA420453A14355235D382F6472F8568A18B2F057A14602975563CC27944640AC607CD107AE10923D9EF7A73C643E166BE5EBEAFA34B1AC553E2", False),  # has_even_y(R) is false
+    (7, None, "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659", None,
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "1FA62E331EDBC21C394792D2AB1100A7B432B013DF3F6FF4F99FCB33E0E1515F28890B3EDB6E7189B630448B515CE4F8622A954CFE545735AAEA5134FCCDB2BD", False),  # negated message
+    (8, None, "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659", None,
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "6CFF5C3BA86C69EA4B7376F31A9BCB4F74C1976089B2D9963DA2E5543E177769961764B3AA9B2FFCB6EF947B6887A226E8D7C93E00C5ED0C1834FF0D0C2E6DA6", False),  # negated s value
+    (9, None, "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659", None,
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "0000000000000000000000000000000000000000000000000000000000000000123DDA8328AF9C23A94C1FEECFD123BA4FB73476F0D594DCB65C6425BD186051", False),  # sG - eP is infinite. Test fails in single verification if has_even_y(inf) is defined as true and x(inf) as 0
+    (10, None, "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659", None,
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "00000000000000000000000000000000000000000000000000000000000000017615FBAF5AE28864013C099742DEADB4DBA87F11AC6754F93780D5A1837CF197", False),  # sG - eP is infinite. Test fails in single verification if has_even_y(inf) is defined as true and x(inf) as 1
+    (11, None, "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659", None,
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "4A298DACAE57395A15D0795DDBFD1DCB564DA82B0F269BC70A74F8220429BA1D69E89B4C5564D00349106B8497785DD7D1D713A8AE82B32FA79D5F7FC407D39B", False),  # sig[0:32] is not an X coordinate on the curve
+    (12, None, "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659", None,
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F69E89B4C5564D00349106B8497785DD7D1D713A8AE82B32FA79D5F7FC407D39B", False),  # sig[0:32] is equal to field size
+    (13, None, "DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659", None,
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "6CFF5C3BA86C69EA4B7376F31A9BCB4F74C1976089B2D9963DA2E5543E177769FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", False),  # sig[32:64] is equal to curve order
+    (14, None, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC30", None,
+     "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
+     "6CFF5C3BA86C69EA4B7376F31A9BCB4F74C1976089B2D9963DA2E5543E17776969E89B4C5564D00349106B8497785DD7D1D713A8AE82B32FA79D5F7FC407D39B", False),  # public key is not a valid X coordinate because it exceeds the field size
+]
+
+
+def run_schnorr_checks(lib, kat):
+    # The independent reference must itself reproduce every published vector,
+    # BEFORE we trust it to cross-check the shim (defends against a mistyped
+    # vector, the same discipline as the BIP-32 xprv/xpub reconstruction).
+    for idx, sk, pk, aux, msg, sig, valid in SCHNORR_VECTORS:
+        pkb, msgb, sigb = bytes.fromhex(pk), bytes.fromhex(msg), bytes.fromhex(sig)
+        kat.check(f"BIP-340 ref verify vector {idx}", _sn_ref_verify(msgb, pkb, sigb) == valid)
+        if sk is not None:
+            ref = _sn_ref_sign(msgb, bytes.fromhex(sk), bytes.fromhex(aux))
+            kat.check(f"BIP-340 ref sign vector {idx}", ref == sigb)
+
+    # Now the shim, against both the published vector AND the reference.
+    for idx, sk, pk, aux, msg, sig, valid in SCHNORR_VECTORS:
+        pkb, msgb, sigb = bytes.fromhex(pk), bytes.fromhex(msg), bytes.fromhex(sig)
+        # verify: shim result must match the published TRUE/FALSE
+        rc = lib.cnx_schnorr_verify(pkb, msgb, sigb)
+        kat.check(f"BIP-340 shim verify vector {idx}", (rc == 0) == valid, f"rc={rc}")
+        if sk is None:
+            continue
+        skb, auxb = bytes.fromhex(sk), bytes.fromhex(aux)
+        # x-only pubkey from the shim equals the published pubkey
+        xonly = ctypes.create_string_buffer(32)
+        rc = lib.cnx_xonly_from_seckey(skb, xonly)
+        kat.check(f"BIP-340 shim xonly vector {idx}", rc == 0 and xonly.raw == pkb, f"rc={rc}")
+        # deterministic sign: shim signature == published == reference
+        out = ctypes.create_string_buffer(64)
+        rc = lib.cnx_schnorr_sign(skb, msgb, auxb, out)
+        kat.check(f"BIP-340 shim sign vector {idx}", rc == 0 and out.raw == sigb, f"rc={rc}")
+        # and the shim verifies its own signature
+        rc = lib.cnx_schnorr_verify(pkb, msgb, out.raw)
+        kat.check(f"BIP-340 shim self-verify vector {idx}", rc == 0, f"rc={rc}")
+
+    # aux_rand = NULL must behave as 32 zero bytes: vector 0 uses all-zero aux,
+    # so signing it with a NULL aux pointer must reproduce the same signature.
+    idx, sk, pk, aux, msg, sig, valid = SCHNORR_VECTORS[0]
+    out = ctypes.create_string_buffer(64)
+    rc = lib.cnx_schnorr_sign(bytes.fromhex(sk), bytes.fromhex(msg), None, out)
+    kat.check("BIP-340 NULL aux == zero aux", rc == 0 and out.raw == bytes.fromhex(sig), f"rc={rc}")
+
+
+# ---------------------------------------------------------------------------
+# Taproot (BIP-341 key-path tweak + BIP-86 address). The shim's
+# cnx_taproot_tweak_pubkey computes the witness-v1 output key
+# Q = P + int(hash_TapTweak(P))*G; this section pins it (and the Bech32m bc1p
+# address the script layer builds) to the OFFICIAL BIP-86 test vectors, cross-
+# checked against an independent tweak using the BIP-340 reference point ops.
+# (internal x-only key, expected output key, expected bc1p address).
+TAPROOT_VECTORS = [
+    ("cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115",
+     "a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c",
+     "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"),
+    ("83dfe85a3151d2517290da461fe2815591ef69f2b18a2ce63f01697a8b313145",
+     "a82f29944d65b86ae6b5e5cc75e294ead6c59391a1edc5e016e3498c67fc7bbb",
+     "bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh"),
+    ("399f1b2f4393f29a18c937859c5dd8a77350103157eb880f02e8c08214277cef",
+     "882d74e5d0572d5a816cef0041a96b6c1de832f6f9676d9605c44d5e9a97d3dc",
+     "bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7"),
+]
+
+
+def _tr_ref_tweak(internal):
+    # BIP-341 key-path-only output key, via the BIP-340 reference point ops.
+    t = int.from_bytes(_sn_taghash("TapTweak", internal), "big")
+    P = _sn_lift_x(int.from_bytes(internal, "big"))
+    Q = _sn_add(P, _sn_mul(_SECP_G, t))
+    return Q[0].to_bytes(32, "big")
+
+
+def _bech32m_p2tr(hrp, prog):
+    # witness v1 + 32-byte program, Bech32m (const 0x2bc830a3), the exact
+    # encoding cxBtcAddressP2TR must produce.
+    data = [1]
+    acc = bits = 0
+    for b in prog:
+        acc = (acc << 8) | b
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            data.append((acc >> bits) & 31)
+    if bits:
+        data.append((acc << (5 - bits)) & 31)
+    expand = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+    polymod = _bech32_polymod(expand + data + [0] * 6) ^ 0x2BC830A3
+    checksum = [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
+    return hrp + "1" + "".join(_BECH32[d] for d in data + checksum)
+
+
+def run_taproot_checks(lib, kat):
+    for internal, output, address in TAPROOT_VECTORS:
+        ib, ob = bytes.fromhex(internal), bytes.fromhex(output)
+        # independent reference reproduces the published output key + address
+        kat.check(f"BIP-86 ref tweak {address[:12]}", _tr_ref_tweak(ib) == ob)
+        kat.check(f"BIP-86 ref bech32m {address[:12]}", _bech32m_p2tr("bc", ob) == address)
+        # the shim's tweak matches the published output key
+        out = ctypes.create_string_buffer(32)
+        rc = lib.cnx_taproot_tweak_pubkey(ib, out)
+        kat.check(f"BIP-86 shim tweak {address[:12]}", rc == 0 and out.raw == ob, f"rc={rc}")
+
+
 def main(argv):
     check = "--check" in argv[1:]
     cc = find_cc()
@@ -682,6 +1027,9 @@ def main(argv):
         run_external_crosschecks(lib, kat)
         run_address_vectors(lib, kat)
         run_bip39_checks(lib, kat)
+        run_hd_checks(lib, kat)
+        run_schnorr_checks(lib, kat)
+        run_taproot_checks(lib, kat)
 
     if kat.problems:
         for p in kat.problems:

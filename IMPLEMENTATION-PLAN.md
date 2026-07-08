@@ -4,21 +4,24 @@ The phased build order for CoinXT (see [SPEC.md](SPEC.md) for WHAT, [CLAUDE.md](
 rules). Each phase has a concrete "done when" bar and states the risk it retires. Build in order: the
 native seam and the KAT harness come first, because everything downstream trusts them.
 
-> Status: **phase 0 done; phases 1-2 native DONE and externally verified; the `.lcb` + `cx*` script
+> Status: **phase 0 done; phases 1-4 native DONE and externally verified; the `.lcb` + `cx*` script
 > layer is written and statically gated but NEEDS AN ON-ENGINE PASS** (see the as-built notes in
-> [CLAUDE.md](CLAUDE.md)). The shim (ABI 2) exports the full hash/KDF surface and the secp256k1 curve
-> surface; the KAT harness pins the classic RFC 6979 vectors and cross-checks signatures, pubkeys, and
-> ECDH against python-ecdsa in both directions (the "verifies in an independent library" bar, met
-> headless). The full stack ran 41/41 on a real engine (see CLAUDE.md as-built). **Phase 3 (encodings
-> and addresses) is now IN**, pure script: hex, Base58Check, Bech32/Bech32m, EIP-55, and BTC (P2PKH,
-> P2WPKH) + ETH address builders, transcription-verified against Python and vector-locked in CI to the
-> public BIP-173 / EIP-55 vectors (needs an on-engine pass). Schnorr / BIP-340 is deferred to a Taproot
-> phase (upstream provides it only via secp256k1-zkp). Unlike OnionXT (pure script), CoinXT HAS a C
-> shim, so the FFI/C-ABI section of CLAUDE.md is law, and every shim change builds under ASan + UBSan
-> and bumps the ABI + `cxCheckABI()` on any ABI change. **BIP-39 mnemonics are now IN** too (pure
-> script over the embedded 2048-word list; entropy<->words, validate, and mnemonic->seed via the
-> existing PBKDF2), vector-locked to the Trezor BIP-39 vectors. Next: BIP-32 HD derivation, the one
-> remaining wallet piece that needs native work (vendored `bip32.c` + an ABI bump to 3).
+> [CLAUDE.md](CLAUDE.md)). The shim (ABI 3) exports the full hash/KDF surface, the secp256k1 curve
+> surface, BIP-32 HD child-key derivation, BIP-340 Schnorr, and the BIP-341 Taproot key-path tweak; the
+> KAT harness pins the classic RFC 6979 vectors, the official BIP-32 / BIP-340 / BIP-86 vectors, and
+> cross-checks signatures, pubkeys, and ECDH against independent implementations in both directions (the
+> "verifies in an independent library" bar, met headless: python-ecdsa for ECDSA, a BIP-340 reference
+> for Schnorr). The phases 1-3 stack ran 41/41 on a real engine (see CLAUDE.md as-built); the ABI-3
+> additions need their own pass. **Encodings/addresses and BIP-39 mnemonics are IN**, pure script: hex,
+> Base58Check, Bech32/Bech32m, EIP-55, the BTC (P2PKH, P2WPKH, P2TR) + ETH address builders, xprv/xpub
+> framing, and the BIP-39 surface over the embedded 2048-word list, transcription-verified against
+> Python and vector-locked in CI (BIP-173/350, BIP-86, EIP-55, Trezor BIP-39, BIP-32). The BIP-32 CKD
+> and BIP-340/341 schemes are TRANSCRIBED over the audited primitives already vendored, not vendored
+> anew (no `bip32.c` multi-curve tree, no secp256k1-zkp): a standard public key-derivation / signature
+> scheme composing audited ops, KAT-pinned, like the address encoders. Unlike OnionXT (pure script),
+> CoinXT HAS a C shim, so the FFI/C-ABI section of CLAUDE.md is law, and every shim change builds under
+> ASan + UBSan and bumps the ABI + `cxCheckABI()` on any ABI change. Next: SLIP-39, transaction
+> building (the app confirms decoded intent before signing), and the remaining on-engine passes.
 
 ## The "done" bar (applies to every phase)
 

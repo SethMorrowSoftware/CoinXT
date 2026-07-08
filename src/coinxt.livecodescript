@@ -598,7 +598,10 @@ function cxBech32Encode pHrp, pWitVer, pProgram
    if pWitVer is 0 then
       put 1 into tConst
    else
-      put 719259665 into tConst
+      -- Bech32m constant 0x2bc830a3 (BIP-350), used for witness v1+ (Taproot).
+      -- This path is now exercised by cxBtcAddressP2TR and locked to the
+      -- BIP-86 bc1p vectors in tools/coin-kat.py.
+      put 734539939 into tConst
    end if
    -- data = witver (one 5-bit value) then the 8->5 conversion of the program
    put numToByte(pWitVer) & cxBits8to5(pProgram) into tValues
@@ -994,3 +997,260 @@ end cxMnemonicValidate
 function cxMnemonicToSeed pWords, pPassphrase
    return cxPbkdf2HmacSha512(textEncode(pWords, "utf-8"), textEncode("mnemonic" & pPassphrase, "utf-8"), 2048, 64)
 end cxMnemonicToSeed
+
+----------------------------------------------------------------------
+-- HD wallets (BIP-32; phase 4b)
+--
+-- The node is the 73-byte opaque blob the shim returns
+-- (depth||parent_fingerprint||child||chaincode||privkey). It CARRIES A
+-- PRIVATE KEY, so this layer clears its node variables the moment it is done,
+-- exactly as it does for a seckey. xprv/xpub are framed HERE in script (the
+-- version bytes + Base58Check over the blob fields), so no extra native call
+-- is needed for serialization.
+----------------------------------------------------------------------
+
+-- master node from a BIP-39/other seed (I = HMAC-SHA512("Bitcoin seed", seed))
+function cxHdFromSeed pSeed
+   local tOut
+   try
+      put cxbHdFromSeed(pSeed) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxHdFromSeed)")
+   end try
+   return tOut
+end cxHdFromSeed
+
+-- one derivation step (index 0..2^31-1; pHardened sets the high bit)
+function cxHdDerive pNode, pIndex, pHardened
+   local tOut
+   try
+      put cxbHdDerive(pNode, pIndex, pHardened) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxHdDerive)")
+   end try
+   return tOut
+end cxHdDerive
+
+-- derive a whole path like "m/44'/0'/0'/0/0" (the apostrophe, or a trailing h
+-- or H, marks a hardened level). Returns the final node, or a CoinXT: error on
+-- a malformed path or a failed step. Intermediate parent nodes (each carrying
+-- a private key) are cleared as we go.
+function cxHdDerivePath pNode, pPath
+   local tSavedDelim
+   local tCount
+   local tI
+   local tPart
+   local tHardened
+   local tSteps
+   local tNode
+   local tNext
+   local tStepLine
+   -- PASS 1: parse + validate the path into steps ("index hardened" per line)
+   put empty into tSteps
+   put the itemDelimiter into tSavedDelim
+   set the itemDelimiter to "/"
+   put the number of items of pPath into tCount
+   repeat with tI = 1 to tCount
+      put item tI of pPath into tPart
+      if tI is 1 and (tPart is "m" or tPart is "M") then
+         next repeat
+      end if
+      if tPart is empty then
+         next repeat
+      end if
+      put false into tHardened
+      if last char of tPart is "'" or last char of tPart is "h" or last char of tPart is "H" then
+         put true into tHardened
+         delete last char of tPart
+      end if
+      if tPart is not an integer then
+         set the itemDelimiter to tSavedDelim
+         return "CoinXT: bad element in derivation path " & pPath & " (cxHdDerivePath)"
+      end if
+      if tPart < 0 or tPart > 2147483647 then
+         set the itemDelimiter to tSavedDelim
+         return "CoinXT: derivation index out of range (cxHdDerivePath)"
+      end if
+      put tPart & space & tHardened & return after tSteps
+   end repeat
+   set the itemDelimiter to tSavedDelim
+   -- PASS 2: derive step by step, clearing each parent node
+   put pNode into tNode
+   repeat for each line tStepLine in tSteps
+      put cxHdDerive(tNode, word 1 of tStepLine, (word 2 of tStepLine is "true")) into tNext
+      put empty into tNode
+      if cxIsError(tNext) then
+         return tNext
+      end if
+      put tNext into tNode
+   end repeat
+   return tNode
+end cxHdDerivePath
+
+-- the node's fields (the private key is secret; clear your copy when done)
+function cxHdSeckey pNode
+   local tOut
+   try
+      put cxbHdPrivateKey(pNode) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxHdSeckey)")
+   end try
+   return tOut
+end cxHdSeckey
+
+function cxHdPubkey pNode
+   local tOut
+   try
+      put cxbHdPublicKey(pNode) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxHdPubkey)")
+   end try
+   return tOut
+end cxHdPubkey
+
+function cxHdChainCode pNode
+   local tOut
+   try
+      put cxbHdChainCode(pNode) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxHdChainCode)")
+   end try
+   return tOut
+end cxHdChainCode
+
+-- xprv (extended PRIVATE key), Base58Check. pMainnet defaults true. The result
+-- carries the private key: treat it as secret. version||depth||fp||child||cc||
+-- 0x00||priv, then Base58Check.
+function cxXprv pNode, pMainnet
+   local tVersion
+   local tPriv
+   local tBody
+   local tCheck
+   if pMainnet is false then
+      put binaryEncode("H*", "04358394") into tVersion
+   else
+      put binaryEncode("H*", "0488ade4") into tVersion
+   end if
+   put cxHdSeckey(pNode) into tPriv
+   if cxIsError(tPriv) then
+      return tPriv && "(cxXprv)"
+   end if
+   put tVersion & (byte 1 to 41 of pNode) & numToByte(0) & tPriv into tBody
+   put empty into tPriv
+   put cxHash256(tBody) into tCheck
+   if cxIsError(tCheck) then
+      return tCheck && "(cxXprv)"
+   end if
+   return cxB58Encode(tBody & (byte 1 to 4 of tCheck))
+end cxXprv
+
+-- xpub (extended PUBLIC key), Base58Check. version||depth||fp||child||cc||
+-- pubkey33, then Base58Check.
+function cxXpub pNode, pMainnet
+   local tVersion
+   local tPub
+   local tBody
+   local tCheck
+   if pMainnet is false then
+      put binaryEncode("H*", "043587cf") into tVersion
+   else
+      put binaryEncode("H*", "0488b21e") into tVersion
+   end if
+   put cxHdPubkey(pNode) into tPub
+   if cxIsError(tPub) then
+      return tPub && "(cxXpub)"
+   end if
+   put tVersion & (byte 1 to 41 of pNode) & tPub into tBody
+   put cxHash256(tBody) into tCheck
+   if cxIsError(tCheck) then
+      return tCheck && "(cxXpub)"
+   end if
+   return cxB58Encode(tBody & (byte 1 to 4 of tCheck))
+end cxXpub
+
+----------------------------------------------------------------------
+-- Schnorr / BIP-340 + Taproot (phase 4b)
+--
+-- BIP-340 Schnorr signing/verification over a 32-byte message (as with
+-- cxSign, the app hands CoinXT the exact digest; Taproot always signs a
+-- 32-byte sighash). The x-only public key is 32 bytes. cxBtcAddressP2TR
+-- performs the BIP-341 key-path tweak in the shim, then Bech32m-frames the
+-- witness-v1 output key into a bc1p address. All native ops are transcribed
+-- from the published BIP-340/341 schemes and pinned to the official vectors
+-- (BIP-340 test vectors, BIP-86 addresses) in tools/coin-kat.py.
+----------------------------------------------------------------------
+
+-- the 32-byte BIP-340 x-only public key of a 32-byte secret key
+function cxXonlyFromSeckey pSeckey
+   local tOut
+   try
+      put cxbXonlyFromSeckey(pSeckey) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxXonlyFromSeckey)")
+   end try
+   return tOut
+end cxXonlyFromSeckey
+
+-- BIP-340 sign: 32-byte seckey, 32-byte message, OPTIONAL 32-byte aux_rand
+-- (pass empty to omit; the shim then uses 32 zero bytes, the BIP-340 default).
+-- Returns the 64-byte signature, or a CoinXT: error.
+function cxSchnorrSign pSeckey, pMessage, pAuxRand
+   local tOut
+   try
+      put cxbSchnorrSign(pSeckey, pMessage, pAuxRand) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxSchnorrSign)")
+   end try
+   return tOut
+end cxSchnorrSign
+
+-- BIP-340 verify: 32-byte x-only pubkey, 32-byte message, 64-byte signature.
+-- Returns true only for a valid signature; every malformed input is false.
+function cxSchnorrVerify pXonly, pMessage, pSig
+   try
+      return cxbSchnorrVerify(pXonly, pMessage, pSig)
+   catch tErr
+      return false
+   end try
+end cxSchnorrVerify
+
+-- BIP-341 key-path Taproot output key: tweak a 32-byte x-only INTERNAL key to
+-- the 32-byte witness-v1 OUTPUT key. Public helper for callers that want the
+-- raw output key; cxBtcAddressP2TR wraps it into a bc1p address.
+function cxTaprootOutputKey pXonlyInternal
+   local tOut
+   try
+      put cxbTaprootTweak(pXonlyInternal) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxTaprootOutputKey)")
+   end try
+   return tOut
+end cxTaprootOutputKey
+
+-- Taproot P2TR address (BIP-86 single-key). Takes a pubkey (33/65-byte SEC1,
+-- or a 32-byte x-only internal key), tweaks it to the output key, and Bech32m-
+-- frames it as a witness-v1 bc1p (mainnet, default) / tb1p (testnet) address.
+function cxBtcAddressP2TR pPubkey, pMainnet
+   local tXonly
+   local tOutputKey
+   local tHrp
+   -- accept a full SEC1 pubkey (drop the prefix to the 32-byte x) or an
+   -- already-x-only 32-byte key
+   if the number of bytes in pPubkey is 33 or the number of bytes in pPubkey is 65 then
+      put byte 2 to 33 of pPubkey into tXonly
+   else if the number of bytes in pPubkey is 32 then
+      put pPubkey into tXonly
+   else
+      return "CoinXT: P2TR needs a 33/65-byte pubkey or a 32-byte x-only key (cxBtcAddressP2TR)"
+   end if
+   put cxTaprootOutputKey(tXonly) into tOutputKey
+   if cxIsError(tOutputKey) then
+      return tOutputKey && "(cxBtcAddressP2TR)"
+   end if
+   if pMainnet is false then
+      put "tb" into tHrp
+   else
+      put "bc" into tHrp
+   end if
+   return cxBech32Encode(tHrp, 1, tOutputKey)
+end cxBtcAddressP2TR
