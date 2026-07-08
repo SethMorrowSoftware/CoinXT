@@ -20,6 +20,9 @@
 -- EIP-155 transaction: RLP -> keccak -> sign -> raw broadcast bytes), BTC Tx
 -- (a COMPLETE offline BIP-143 SegWit spend - native or nested - that
 -- reproduces the official BIP-143 example byte for byte, fee always shown),
+-- PSBT (BIP-174 cold signing: decode a pasted PSBT's intent, sign only what
+-- your key or the Wallet phrase's derivation paths control, finalize and
+-- extract - the Sparrow / Electrum / Core interchange flow),
 -- Shared Secret (ECDH, including your-key x pasted-pubkey), Hashes (the
 -- Keccak-256 vs SHA3-256 footgun, plus SHA-2, RIPEMD-160, hash160/hash256,
 -- HMAC), Wallet (type/paste ANY BIP-39 phrase to RESTORE it, or generate
@@ -75,7 +78,7 @@ constant kClrPillBad = "247,216,216"     -- ABI pill: not loaded
 constant kClrPillBadText = "150,42,42"
 
 -- ------------------------------------------------------------------ state
-local sTab            -- active tab: keys | addr | sign | schn | eth | btx | ecdh | hash | seed | dec | about
+local sTab            -- active tab: keys | addr | sign | schn | eth | btx | psbt | ecdh | hash | seed | dec | about
 local sSeckey         -- the demo seckey (PUBLIC test key material only)
 local sPub33          -- its compressed pubkey
 local sPub65          -- its uncompressed pubkey
@@ -375,19 +378,20 @@ on buildUI
    set the textAlign of field "ui:pillText" to "center"
    refreshAbiPill
 
-   -- tab bar: eleven equal tabs on one 105px rhythm, full labels (the wide
-   -- canvas means no abbreviations), flush with the panel edges
-   cxdButton "ui:tabKeys", "24,74,126,104", "Keys", "idle"
-   cxdButton "ui:tabAddr", "129,74,231,104", "Addresses", "idle"
-   cxdButton "ui:tabSign", "234,74,336,104", "Sign", "idle"
-   cxdButton "ui:tabSchn", "339,74,441,104", "Schnorr", "idle"
-   cxdButton "ui:tabEth", "444,74,546,104", "Ethereum", "idle"
-   cxdButton "ui:tabBtx", "549,74,651,104", "BTC Tx", "idle"
-   cxdButton "ui:tabEcdh", "654,74,756,104", "ECDH", "idle"
-   cxdButton "ui:tabHash", "759,74,861,104", "Hashes", "idle"
-   cxdButton "ui:tabSeed", "864,74,966,104", "Wallet", "idle"
-   cxdButton "ui:tabDec", "969,74,1071,104", "Decode", "idle"
-   cxdButton "ui:tabAbout", "1074,74,1176,104", "About", "idle"
+   -- tab bar: twelve equal tabs on one 96px rhythm, full labels, flush
+   -- with the panel edges
+   cxdButton "ui:tabKeys", "24,74,117,104", "Keys", "idle"
+   cxdButton "ui:tabAddr", "120,74,213,104", "Addresses", "idle"
+   cxdButton "ui:tabSign", "216,74,309,104", "Sign", "idle"
+   cxdButton "ui:tabSchn", "312,74,405,104", "Schnorr", "idle"
+   cxdButton "ui:tabEth", "408,74,501,104", "Ethereum", "idle"
+   cxdButton "ui:tabBtx", "504,74,597,104", "BTC Tx", "idle"
+   cxdButton "ui:tabPsbt", "600,74,693,104", "PSBT", "idle"
+   cxdButton "ui:tabEcdh", "696,74,789,104", "ECDH", "idle"
+   cxdButton "ui:tabHash", "792,74,885,104", "Hashes", "idle"
+   cxdButton "ui:tabSeed", "888,74,981,104", "Wallet", "idle"
+   cxdButton "ui:tabDec", "984,74,1077,104", "Decode", "idle"
+   cxdButton "ui:tabAbout", "1080,74,1173,104", "About", "idle"
 
    -- content panel + footer
    cxdPanel "ui:panel", "24,114,1176,632"
@@ -399,6 +403,7 @@ on buildUI
    buildSchnorrTab
    buildEthTab
    buildBtxTab
+   buildPsbtTab
    buildEcdhTab
    buildHashTab
    buildSeedTab
@@ -541,6 +546,20 @@ on buildBtxTab
    cxdLabel "btx:status", "48,596,1152,628", "Load the example (it also adopts the example's PUBLIC key), or fill in your own test coin. Nothing is broadcast; the output is raw bytes you can inspect in any tx decoder.", kClrInkSoft, 12, "plain"
 end buildBtxTab
 
+-- ---- PSBT tab (BIP-174 cold signing)
+on buildPsbtTab
+   cxdHdr "psbt:h", "48,128,1152,156", "PSBT: the cold-signing flow every Bitcoin wallet speaks (BIP-174)"
+   cxdCap "psbt:p", "48,158,1152,206", "Paste a Partially Signed Bitcoin Transaction from Sparrow, Electrum, or Core: Decode shows exactly what it pays before anything is signed; Sign adds signatures ONLY for the single-key SegWit inputs your key controls (by direct key, or by walking the PSBT's own BIP32 derivation paths from the Wallet tab's phrase - the air-gapped hardware-wallet flow); Finalize extracts the broadcast-ready transaction. The prefill wraps the official BIP-143 example, so Sign + Finalize must end at the BIP's published bytes.", kClrInkSoft
+   cxdButton "psbt:dec", "48,214,236,244", "Decode intent", "primary"
+   cxdButton "psbt:signhd", "248,214,478,244", "Sign (Wallet tab phrase)", "idle"
+   cxdButton "psbt:signkey", "490,214,690,244", "Sign (Keys tab key)", "idle"
+   cxdButton "psbt:final", "702,214,902,244", "Finalize + extract", "idle"
+   cxdCap "psbt:inLabel", "48,252,1152,270", "PSBT (base64 or hex). The signed form replaces this field, so the flow chains: decode -> sign -> finalize.", kClrInkMute
+   cxdInput "psbt:in", "48,272,1152,330", "cHNidP8BAHcBAAAAAdtrGyCqD9eyOIC+LsvUqYEwl0z0dI+2YJKsTTzrGlR3AQAAAAD+////Ari06wsAAAAAGXapFKRXtoTX8NU5pGpFu8BD81tZ0NljiKwACK8vAAAAABl2qRT9Jwse5qvK6pf+p60EAui9itbXfIiskgQAAAABASAAypo7AAAAABepFEcz83z024b7wu/tJQC09OSfMSAjhwEDBAEAAAABBBYAFHkJGXIYbESesd7SK3jkDQCb3wCJAAAA"
+   cxdMono "psbt:out", "48,338,1152,586"
+   cxdLabel "psbt:status", "48,596,1152,628", "Decode first - a cold signer NEVER signs what it has not shown you. (The prefilled example's key loads via the BTC Tx tab's Load button.)", kClrInkSoft, 12, "plain"
+end buildPsbtTab
+
 -- ---- Shared Secret (ECDH) tab
 on buildEcdhTab
    cxdHdr "ecdh:h", "48,128,1152,156", "Two parties, one shared secret (ECDH)"
@@ -598,7 +617,7 @@ end buildDecodeTab
 -- ---- About tab (pitch + embedded self-test)
 on buildAboutTab
    cxdHdr "about:h", "48,128,1152,156", "CoinXT: Bitcoin and Ethereum primitives for xTalk"
-   cxdCap "about:exp", "48,158,1152,290", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
+   cxdCap "about:exp", "48,158,1152,290", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), act as a PSBT cold signer (decode, sign, finalize BIP-174 files from Sparrow / Electrum / Core, including HD signing via the PSBT's own derivation paths), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
    cxdButton "about:selftest", "48,298,300,328", "Run the full self-test", "primary"
    cxdMono "about:out", "48,338,1152,586"
    cxdLabel "about:status", "48,596,1152,628", "Click Run the full self-test to check every primitive against a public vector.", kClrInkSoft, 12, "plain"
@@ -630,6 +649,7 @@ on restyleTabs
    styleTab "ui:tabSchn", (sTab is "schn")
    styleTab "ui:tabEth", (sTab is "eth")
    styleTab "ui:tabBtx", (sTab is "btx")
+   styleTab "ui:tabPsbt", (sTab is "psbt")
    styleTab "ui:tabEcdh", (sTab is "ecdh")
    styleTab "ui:tabHash", (sTab is "hash")
    styleTab "ui:tabSeed", (sTab is "seed")
@@ -671,6 +691,8 @@ on mouseUp
       handleEth tRole
    else if tPrefix is "btx" then
       handleBtx tRole
+   else if tPrefix is "psbt" then
+      handlePsbt tRole
    else if tPrefix is "ecdh" then
       handleEcdh tRole
    else if tPrefix is "hash" then
@@ -697,6 +719,8 @@ on handleChrome pRole
       showTab "eth"
    else if pRole is "tabBtx" then
       showTab "btx"
+   else if pRole is "tabPsbt" then
+      showTab "psbt"
    else if pRole is "tabEcdh" then
       showTab "ecdh"
    else if pRole is "tabHash" then
@@ -1262,6 +1286,77 @@ on doBtxSign
    put tOut into field "btx:out"
    cxdStatus "btx:status", "Signed offline: paste the raw tx into any decoder to inspect it. NEVER broadcast a demo transaction.", "ok"
 end doBtxSign
+
+-- ------------------------------------------------------------------ PSBT tab actions
+on handlePsbt pRole
+   if pRole is "dec" then
+      doPsbtDecode
+   else if pRole is "signhd" then
+      doPsbtSign "hd"
+   else if pRole is "signkey" then
+      doPsbtSign "key"
+   else if pRole is "final" then
+      doPsbtFinal
+   end if
+end handlePsbt
+
+on doPsbtDecode
+   local tRes
+   put cxPsbtDecode(field "psbt:in") into tRes
+   put tRes into field "psbt:out"
+   if cxIsError(tRes) then
+      cxdStatus "psbt:status", "Rejected (fail closed): not a decodable PSBT.", "bad"
+   else
+      cxdStatus "psbt:status", "This is what the transaction PAYS. Only sign it if every line is what you intend.", "ok"
+   end if
+end doPsbtDecode
+
+-- sign with the Keys-tab key ("key") or by walking the PSBT's BIP32 paths
+-- from the Wallet tab's phrase ("hd", the air-gapped hardware-wallet flow)
+on doPsbtSign pMode
+   local tMnem
+   local tMaster
+   local tNew
+   if pMode is "key" then
+      if haveKey("psbt:status") is false then
+         exit doPsbtSign
+      end if
+      put cxPsbtSign(field "psbt:in", sSeckey) into tNew
+   else
+      put word 1 to -1 of field "seed:mnem" into tMnem
+      if cxMnemonicValidate(tMnem) is false then
+         cxdStatus "psbt:status", "The Wallet tab's seed phrase does not validate - fix it there first.", "bad"
+         exit doPsbtSign
+      end if
+      put cxHdFromSeed(cxMnemonicToSeed(tMnem, field "seed:pp")) into tMaster
+      put cxPsbtSign(field "psbt:in", tMaster) into tNew
+      put empty into tMaster
+   end if
+   if cxIsError(tNew) then
+      put tNew into field "psbt:out"
+      cxdStatus "psbt:status", "Refused to sign (fail closed).", "bad"
+      exit doPsbtSign
+   end if
+   -- chain the flow: the signed PSBT replaces the input, the report shows it
+   put tNew into field "psbt:in"
+   put cxPsbtDecode(tNew) into field "psbt:out"
+   cxdStatus "psbt:status", "Signed every input this key controls (the sig counts above show which). Pass the PSBT back to the wallet, or Finalize here.", "ok"
+end doPsbtSign
+
+on doPsbtFinal
+   local tRes
+   local tOut
+   put cxPsbtFinalize(field "psbt:in") into tRes
+   if cxIsError(tRes) then
+      put tRes into field "psbt:out"
+      cxdStatus "psbt:status", "Not finalizable yet - the error names the input and why.", "bad"
+      exit doPsbtFinal
+   end if
+   put "txid     " & line 1 of tRes & return into tOut
+   put "raw tx   " & cxHexEncode(line 2 to -1 of tRes) after tOut
+   put tOut into field "psbt:out"
+   cxdStatus "psbt:status", "Broadcast-ready bytes, built entirely offline. NEVER broadcast a demo transaction.", "ok"
+end doPsbtFinal
 
 -- ------------------------------------------------------------------ ECDH tab actions
 on handleEcdh pRole
@@ -1971,6 +2066,18 @@ on doSelfTest
       checkInto (cxHexEncode(line 3 to -1 of tDecoded) is \
          "01000000000101db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a5477010000001716001479091972186c449eb1ded22b78e40d009bdf0089feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac02473044022047ac8e878352d3ebbde1c94ce3a10d057c24175747116f8288e5d794d12d482f0220217f36a485cae903c713331d877c1f64677e3622ad4010726870540656fe9dcb012103ad1d8e89212f0b92c74d23bb710c00662ad1470198ac48c43f7d6f93a2a2687392040000"), \
          "the official BIP-143 example transaction is reproduced byte for byte"
+   end if
+
+   -- PSBT: sign + finalize the wrapped BIP-143 example to the same bytes
+   put cxPsbtSign("cHNidP8BAHcBAAAAAdtrGyCqD9eyOIC+LsvUqYEwl0z0dI+2YJKsTTzrGlR3AQAAAAD+////Ari06wsAAAAAGXapFKRXtoTX8NU5pGpFu8BD81tZ0NljiKwACK8vAAAAABl2qRT9Jwse5qvK6pf+p60EAui9itbXfIiskgQAAAABASAAypo7AAAAABepFEcz83z024b7wu/tJQC09OSfMSAjhwEDBAEAAAABBBYAFHkJGXIYbESesd7SK3jkDQCb3wCJAAAA", \
+      cxdBin("eb696a065ef48a2192da5b28b694f87544b30fae8327c4510137a922f32c6dcf")) into tDecoded
+   if cxIsError(tDecoded) then
+      checkInto false, "a PSBT of the BIP-143 example signs + finalizes to the published tx"
+   else
+      put cxPsbtFinalize(tDecoded) into tDecoded
+      checkInto (not cxIsError(tDecoded) and cxHexEncode(line 2 to -1 of tDecoded) is \
+         "01000000000101db6b1b20aa0fd7b23880be2ecbd4a98130974cf4748fb66092ac4d3ceb1a5477010000001716001479091972186c449eb1ded22b78e40d009bdf0089feffffff02b8b4eb0b000000001976a914a457b684d7f0d539a46a45bbc043f35b59d0d96388ac0008af2f000000001976a914fd270b1ee6abcaea97fea7ad0402e8bd8ad6d77c88ac02473044022047ac8e878352d3ebbde1c94ce3a10d057c24175747116f8288e5d794d12d482f0220217f36a485cae903c713331d877c1f64677e3622ad4010726870540656fe9dcb012103ad1d8e89212f0b92c74d23bb710c00662ad1470198ac48c43f7d6f93a2a2687392040000"), \
+         "a PSBT of the BIP-143 example signs + finalizes to the published tx"
    end if
 
    put sTLog into field "about:out"

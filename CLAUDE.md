@@ -642,3 +642,34 @@ transaction offline, and let a user bring their own test material to every tab.
   the other tabs); copy/preset/toggle buttons follow.
 - Still NEEDS AN ON-ENGINE PASS like every demo change (pure layout, so the checklist is visual:
   no clipped labels, the measured-height cxdLabel fitting still behaves at the new widths).
+
+**Phase 6 - PSBT (BIP-174): the cold-signer surface (2026-07-08).** The demo-to-tool turn: CoinXT
+now speaks the interchange format Sparrow / Electrum / Core exchange, so it works as an air-gapped
+signer. Pure script over the existing primitives (no native change, ABI 3, binaries untouched).
+
+- New public API: `cxPsbtDecode` (parse a base64/hex PSBT, report the intent: every input with
+  outpoint/amount/type/sig-count, every output with address/amount, the fee when knowable - the
+  confirm-before-sign view), `cxPsbtSign` (add SIGHASH_ALL partial signatures for the single-key
+  SegWit inputs - native P2WPKH and BIP-49 nested - the key controls; pKey is a raw 32-byte seckey
+  matched by pubkey hash OR a 73-byte HD master node, in which case the PSBT's own
+  BIP32_DERIVATION entries are walked: fingerprint gate, per-entry path derivation via cxHdDerive,
+  derived-pubkey-equals-entry AND program check), and `cxPsbtFinalize` (single-key witnesses built
+  from the partial sigs; extracts txid + the broadcast-ready network tx). Multisig, legacy P2PKH,
+  and Taproot inputs DECODE and report but do not sign here yet (recorded scope). Internal
+  helpers throw "CoinXT: ..." (script-level throws arrive verbatim in catch); the public three
+  catch and return the error-string contract. The engine's base64Encode WRAPS LINES; cxPsbtB64
+  strips them (a paid-for gotcha, avoided at write time).
+- Anchors, verified in Python mirrors BEFORE transcription (`run_psbt_checks` in coin-kat): the
+  OFFICIAL BIP-174 creator vector parses and re-encodes BYTE-EXACT (order-preserving maps); a
+  PSBT wrapping the official BIP-143 example signs to the BIP's PUBLISHED DER and finalizes to
+  the BIP's PUBLISHED raw tx; an unrelated key returns the PSBT byte-identical (the BIP-174
+  signer role); and an HD PSBT signs by walking m/84'/0'/0'/0/0 from the canonical mnemonic's
+  master (fingerprint 73c5da0a, the well-known value for that mnemonic - an independent
+  confirmation the fingerprint math is right). The same base64 pins run on-engine (`testPsbt`).
+- **The demo is now twelve tabs.** The PSBT tab chains decode -> sign (by Keys-tab key, or by the
+  Wallet tab's phrase via the PSBT's own derivation paths) -> finalize; the signed PSBT replaces
+  the input field so the flow reads like a real signing session; prefilled with the wrapped
+  BIP-143 example so the chain visibly ends at published bytes.
+- Honest status: headless-verified and vector-locked everywhere Python can reach; NEEDS AN
+  ON-ENGINE PASS (`testPsbt` is the checklist; watch the engine's base64 functions and the
+  array-typed locals in the parser, the two most engine-sensitive pieces of this round).

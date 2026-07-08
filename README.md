@@ -83,7 +83,9 @@ CoinXT/
                                   pasted-signature, EIP-191 personal_sign + ecrecover, COMPLETE
                                   offline transactions on both chains - EIP-155 Ethereum and
                                   BIP-143 SegWit Bitcoin, each reproducing its official example
-                                  byte for byte - ECDH with pasted peer keys, the Keccak-vs-SHA3
+                                  byte for byte - a PSBT cold-signer tab (decode / sign / finalize
+                                  BIP-174 files, incl. HD signing via the PSBT's derivation
+                                  paths), ECDH with pasted peer keys, the Keccak-vs-SHA3
                                   footgun + HMAC, wallet RESTORE from any BIP-39 phrase with a
                                   ten-address fidelity listing and a derivation-path explorer,
                                   a decode-anything inspector, self-test)
@@ -133,7 +135,8 @@ packaging follow the family model: a CMake build, a 5-platform CI matrix, and pe
 committed under `src/code/` on main. Addresses, key serialization, and BIP-39 mnemonics are pure
 script: hex, Base58Check, Bech32/Bech32m (encode AND decode), WIF, EIP-55, EIP-191 personal-message
 hashing, RLP (composable encoders that build a complete EIP-155 transaction), strict-DER signature
-framing, address-to-scriptPubKey, a single-input BIP-143 P2WPKH/nested transaction signer, the BTC
+framing, address-to-scriptPubKey, a single-input BIP-143 P2WPKH/nested transaction signer, a
+BIP-174 PSBT decode/sign/finalize surface (the Sparrow / Electrum / Core interchange), the BTC
 (P2PKH, P2SH-P2WPKH, P2WPKH, P2TR) + ETH address builders, xprv/xpub framing, and the BIP-39
 mnemonic surface over the embedded 2048-word list - all transcription-verified against Python and
 vector-locked in CI (BIP-173/350, BIP-49/84/86, EIP-55, Trezor BIP-39, BIP-32, the published WIF
