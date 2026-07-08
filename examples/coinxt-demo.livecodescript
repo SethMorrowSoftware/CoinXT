@@ -352,54 +352,46 @@ private function cxdAscii pText
    return textEncode(pText, "utf-8")
 end cxdAscii
 
--- short hex preview so keys and digests do not become a wall of text
-private function cxdShort pData, pMax
-   local tHex
-   put cxdHex(pData) into tHex
-   if the number of chars in tHex > pMax then
-      return char 1 to pMax of tHex & "..."
-   end if
-   return tHex
-end cxdShort
-
 -- ------------------------------------------------------------------ UI construction
 on buildUI
    if there is a field "ui:title" then
       exit buildUI
    end if
-   set the width of this stack to 900
-   set the height of this stack to 700
+   -- a 720p footprint (fits a 1280x720 display with window chrome to spare):
+   -- wide enough that a full pubkey, signature, or raw tx line never wraps
+   set the width of this stack to 1200
+   set the height of this stack to 680
    set the name of this stack to "CoinXT Demo"
    set the backgroundColor of this stack to kClrPage
 
    -- header band
-   cxdRect "ui:band", "0,0,900,72", kClrBand, 0
-   cxdLabel "ui:title", "28,13,520,52", "CoinXT", kClrBandText, 24, "bold"
-   cxdLabel "ui:subtitle", "30,44,640,68", "Bitcoin and Ethereum cryptography for xTalk, from one library", kClrBandSub, 12, "plain"
+   cxdRect "ui:band", "0,0,1200,64", kClrBand, 0
+   cxdLabel "ui:title", "28,8,520,44", "CoinXT", kClrBandText, 24, "bold"
+   cxdLabel "ui:subtitle", "30,40,760,62", "Bitcoin and Ethereum cryptography for xTalk, from one library", kClrBandSub, 12, "plain"
 
    -- ABI status pill (top-right); set by refreshAbiPill
-   cxdRect "ui:pill", "700,20,872,50", kClrPillBad, 15
-   cxdLabel "ui:pillText", "700,20,872,50", "", kClrPillBadText, 11, "bold"
+   cxdRect "ui:pill", "976,17,1172,47", kClrPillBad, 15
+   cxdLabel "ui:pillText", "976,17,1172,47", "", kClrPillBadText, 11, "bold"
    set the textAlign of field "ui:pillText" to "center"
    refreshAbiPill
 
-   -- tab bar (eleven tabs; short labels so the row fits the 900px window,
-   -- while each panel header spells the capability out in full)
-   cxdButton "ui:tabKeys", "24,84,98,114", "Keys", "idle"
-   cxdButton "ui:tabAddr", "101,84,175,114", "Addr", "idle"
-   cxdButton "ui:tabSign", "178,84,252,114", "Sign", "idle"
-   cxdButton "ui:tabSchn", "255,84,329,114", "Schnorr", "idle"
-   cxdButton "ui:tabEth", "332,84,406,114", "ETH", "idle"
-   cxdButton "ui:tabBtx", "409,84,483,114", "BTC Tx", "idle"
-   cxdButton "ui:tabEcdh", "486,84,560,114", "ECDH", "idle"
-   cxdButton "ui:tabHash", "563,84,637,114", "Hash", "idle"
-   cxdButton "ui:tabSeed", "640,84,714,114", "Wallet", "idle"
-   cxdButton "ui:tabDec", "717,84,791,114", "Decode", "idle"
-   cxdButton "ui:tabAbout", "794,84,868,114", "About", "idle"
+   -- tab bar: eleven equal tabs on one 105px rhythm, full labels (the wide
+   -- canvas means no abbreviations), flush with the panel edges
+   cxdButton "ui:tabKeys", "24,74,126,104", "Keys", "idle"
+   cxdButton "ui:tabAddr", "129,74,231,104", "Addresses", "idle"
+   cxdButton "ui:tabSign", "234,74,336,104", "Sign", "idle"
+   cxdButton "ui:tabSchn", "339,74,441,104", "Schnorr", "idle"
+   cxdButton "ui:tabEth", "444,74,546,104", "Ethereum", "idle"
+   cxdButton "ui:tabBtx", "549,74,651,104", "BTC Tx", "idle"
+   cxdButton "ui:tabEcdh", "654,74,756,104", "ECDH", "idle"
+   cxdButton "ui:tabHash", "759,74,861,104", "Hashes", "idle"
+   cxdButton "ui:tabSeed", "864,74,966,104", "Wallet", "idle"
+   cxdButton "ui:tabDec", "969,74,1071,104", "Decode", "idle"
+   cxdButton "ui:tabAbout", "1074,74,1176,104", "About", "idle"
 
    -- content panel + footer
-   cxdPanel "ui:panel", "24,124,876,652"
-   cxdLabel "ui:footer", "24,662,876,694", "Backed by trezor-crypto through the CoinXT C shim. Signing is deterministic (RFC 6979 / BIP-340, always canonical); every malformed input fails closed. Demo keys are PUBLIC - never fund them.", kClrInkMute, 11, "plain"
+   cxdPanel "ui:panel", "24,114,1176,632"
+   cxdLabel "ui:footer", "24,642,1176,672", "Backed by trezor-crypto through the CoinXT C shim. Signing is deterministic (RFC 6979 / BIP-340, always canonical); every malformed input fails closed. Demo keys are PUBLIC - never fund them.", kClrInkMute, 11, "plain"
 
    buildKeysTab
    buildAddrTab
@@ -445,171 +437,171 @@ end cxdProbe
 
 -- ---- Keys tab
 on buildKeysTab
-   cxdHdr "keys:h", "48,138,852,166", "A key is 32 bytes; CoinXT validates it and derives the public key"
-   cxdCap "keys:p", "48,168,852,214", "CoinXT never invents entropy. The demo key derives from a famously PUBLIC phrase (correct horse battery staple), so it is safe to show and fatal to fund. The SodiumXT button draws real entropy if that library is loaded.", kClrInkSoft
-   cxdButton "keys:demo", "48,222,236,252", "Use the demo key", "primary"
-   cxdButton "keys:sodium", "248,222,468,252", "Draw entropy (SodiumXT)", "idle"
-   cxdButton "keys:copy", "480,222,600,252", "Copy pubkey", "idle"
-   cxdCap "keys:outLabel", "48,266,852,286", "seckey (PUBLIC) / compressed + uncompressed pubkey / x-only (BIP-340) / WIF export:", kClrInkMute
-   cxdMono "keys:out", "48,288,852,452"
-   cxdCap "keys:note", "48,462,852,500", "The compressed pubkey feeds the Bitcoin addresses; the uncompressed one (minus its 04 byte) feeds an Ethereum address. The WIF line is the same secret key in the form every wallet imports. Open the Addresses tab to see all five address forms.", kClrInkMute
-   cxdCap "keys:importLabel", "48,506,852,524", "Or import YOUR OWN test key - paste a WIF string or 64 hex characters (test keys only!):", kClrInkMute
-   cxdInput "keys:import", "48,526,660,556", ""
-   cxdButton "keys:load", "672,526,852,556", "Import key", "primary"
-   cxdLabel "keys:status", "48,566,852,600", "No key yet - click a button above.", kClrInkSoft, 12, "plain"
+   cxdHdr "keys:h", "48,128,1152,156", "A key is 32 bytes; CoinXT validates it and derives the public key"
+   cxdCap "keys:p", "48,158,1152,202", "CoinXT never invents entropy. The demo key derives from a famously PUBLIC phrase (correct horse battery staple), so it is safe to show and fatal to fund. The SodiumXT button draws real entropy if that library is loaded, and you can import your own test key below.", kClrInkSoft
+   cxdButton "keys:demo", "48,210,236,240", "Use the demo key", "primary"
+   cxdButton "keys:sodium", "248,210,468,240", "Draw entropy (SodiumXT)", "idle"
+   cxdButton "keys:copy", "480,210,630,240", "Copy pubkey", "idle"
+   cxdCap "keys:outLabel", "48,250,1152,268", "seckey (PUBLIC) / compressed + uncompressed pubkey / x-only (BIP-340) / WIF export:", kClrInkMute
+   cxdMono "keys:out", "48,270,1152,420"
+   cxdCap "keys:note", "48,428,1152,470", "The compressed pubkey feeds the Bitcoin addresses; the uncompressed one (minus its 04 byte) feeds an Ethereum address. The WIF line is the same secret key in the form every wallet imports. Open the Addresses tab to see all five address forms.", kClrInkMute
+   cxdCap "keys:importLabel", "48,478,1152,496", "Or import YOUR OWN test key - paste a WIF string or 64 hex characters (test keys only!):", kClrInkMute
+   cxdInput "keys:import", "48,498,940,528", ""
+   cxdButton "keys:load", "952,498,1152,528", "Import key", "primary"
+   cxdLabel "keys:status", "48,596,1152,628", "No key yet - click a button above.", kClrInkSoft, 12, "plain"
 end buildKeysTab
 
 -- ---- Addresses tab
 on buildAddrTab
-   cxdHdr "addr:h", "48,138,852,166", "Real Bitcoin and Ethereum addresses from your key"
-   cxdCap "addr:p", "48,168,852,214", "The one public key becomes five addresses: Bitcoin legacy (Base58Check, 1...), nested SegWit (P2SH-P2WPKH, 3..., the form every pre-SegWit wallet can pay), native SegWit (Bech32, bc1q), Taproot (Bech32m, bc1p, BIP-341 tweaked), plus an Ethereum address (Keccak-256 with the EIP-55 mixed-case checksum). All framed in script, pinned to the BIP-173/350, BIP-49/86 and EIP-55 test vectors.", kClrInkSoft
-   cxdButton "addr:go", "48,222,236,252", "Derive addresses", "primary"
-   cxdButton "addr:copyBtc", "248,222,428,252", "Copy SegWit (bc1)", "idle"
-   cxdButton "addr:copyEth", "440,222,600,252", "Copy Ethereum", "eth"
-   cxdButton "addr:net", "612,222,800,252", "Network: mainnet", "idle"
-   cxdCap "addr:outLabel", "48,266,852,286", "P2PKH (1...) / P2SH-P2WPKH (3...) / P2WPKH (bc1q...) / P2TR (bc1p...) / Ethereum (0x...):", kClrInkMute
-   cxdMono "addr:out", "48,288,852,452"
-   cxdCap "addr:note", "48,462,852,502", "The Bitcoin forms come from the COMPRESSED key; the Ethereum form comes from the UNCOMPRESSED key (its last 20 keccak bytes). Taproot tweaks the key (Q = P + hash(P)*G) before encoding. Toggle the network to see the testnet framing of the SAME key (Ethereum uses one address on every chain).", kClrInkMute
-   cxdLabel "addr:status", "48,566,852,600", "Make a key on the Keys tab, then derive its addresses here.", kClrInkSoft, 12, "plain"
+   cxdHdr "addr:h", "48,128,1152,156", "Real Bitcoin and Ethereum addresses from your key"
+   cxdCap "addr:p", "48,158,1152,206", "The one public key becomes five addresses: Bitcoin legacy (Base58Check, 1...), nested SegWit (P2SH-P2WPKH, 3..., the form every pre-SegWit wallet can pay), native SegWit (Bech32, bc1q), Taproot (Bech32m, bc1p, BIP-341 tweaked), plus an Ethereum address (Keccak-256 with the EIP-55 mixed-case checksum). All framed in script, pinned to the BIP-173/350, BIP-49/86 and EIP-55 test vectors.", kClrInkSoft
+   cxdButton "addr:go", "48,214,236,244", "Derive addresses", "primary"
+   cxdButton "addr:copyBtc", "248,214,438,244", "Copy SegWit (bc1)", "idle"
+   cxdButton "addr:copyEth", "450,214,640,244", "Copy Ethereum", "eth"
+   cxdButton "addr:net", "652,214,852,244", "Network: mainnet", "idle"
+   cxdCap "addr:outLabel", "48,254,1152,272", "P2PKH (1...) / P2SH-P2WPKH (3...) / P2WPKH (bc1q...) / P2TR (bc1p...) / Ethereum (0x...):", kClrInkMute
+   cxdMono "addr:out", "48,274,1152,424"
+   cxdCap "addr:note", "48,432,1152,478", "The Bitcoin forms come from the COMPRESSED key; the Ethereum form comes from the UNCOMPRESSED key (its last 20 keccak bytes). Taproot tweaks the key (Q = P + hash(P)*G) before encoding. Toggle the network to see the testnet framing of the SAME key (Ethereum uses one address on every chain).", kClrInkMute
+   cxdLabel "addr:status", "48,596,1152,628", "Make a key on the Keys tab, then derive its addresses here.", kClrInkSoft, 12, "plain"
 end buildAddrTab
 
 -- ---- Sign & Verify tab
 on buildSignTab
-   cxdHdr "sign:h", "48,138,852,166", "Deterministic ECDSA over the digest YOU built"
-   cxdCap "sign:p", "48,168,852,214", "CoinXT signs exactly a 32-byte digest (here SHA-256 of your message). The same key and digest always give the SAME signature (RFC 6979), so there is no nonce to leak. Then flip one bit and watch verification reject it.", kClrInkSoft
-   cxdBadge "sign:b1", "48,224,74,250", "1"
-   cxdButton "sign:go", "82,222,210,252", "Sign", "primary"
-   cxdBadge "sign:b2", "224,224,250,250", "2"
-   cxdButton "sign:verify", "258,222,386,252", "Verify", "idle"
-   cxdBadge "sign:b3", "400,224,426,250", "3"
-   cxdButton "sign:tamper", "434,222,606,252", "Flip a bit & verify", "idle"
-   cxdCap "sign:msgLabel", "48,266,852,286", "Message to sign:", kClrInkMute
-   cxdInput "sign:msg", "48,288,852,320", "Pay Bob 1 coin, invoice 42"
-   cxdCap "sign:outLabel", "48,330,852,350", "digest (SHA-256) / signature (r||s, low-s):", kClrInkMute
-   cxdMono "sign:out", "48,352,852,452"
-   cxdCap "sign:vLabel", "48,460,852,478", "Or verify a PASTED signature against the message above - pubkey hex / signature hex (r||s):", kClrInkMute
-   cxdInput "sign:vpub", "48,480,420,510", ""
-   cxdInput "sign:vsig", "432,480,740,510", ""
-   cxdButton "sign:vgo", "752,480,852,510", "Check", "idle"
-   cxdLabel "sign:status", "48,566,852,600", "Make a key on the Keys tab, then Sign here.", kClrInkSoft, 12, "plain"
+   cxdHdr "sign:h", "48,128,1152,156", "Deterministic ECDSA over the digest YOU built"
+   cxdCap "sign:p", "48,158,1152,202", "CoinXT signs exactly a 32-byte digest (here SHA-256 of your message). The same key and digest always give the SAME signature (RFC 6979), so there is no nonce to leak. Then flip one bit and watch verification reject it - and verify signatures from ANY other library below.", kClrInkSoft
+   cxdBadge "sign:b1", "48,212,74,238", "1"
+   cxdButton "sign:go", "82,210,230,240", "Sign", "primary"
+   cxdBadge "sign:b2", "244,212,270,238", "2"
+   cxdButton "sign:verify", "278,210,426,240", "Verify", "idle"
+   cxdBadge "sign:b3", "440,212,466,238", "3"
+   cxdButton "sign:tamper", "474,210,666,240", "Flip a bit & verify", "idle"
+   cxdCap "sign:msgLabel", "48,250,1152,268", "Message to sign:", kClrInkMute
+   cxdInput "sign:msg", "48,270,1152,300", "Pay Bob 1 coin, invoice 42"
+   cxdCap "sign:outLabel", "48,308,1152,326", "digest (SHA-256) / signature (r||s, low-s):", kClrInkMute
+   cxdMono "sign:out", "48,328,1152,448"
+   cxdCap "sign:vLabel", "48,458,1152,476", "Or verify a PASTED signature against the message above - pubkey hex / signature hex (r||s):", kClrInkMute
+   cxdInput "sign:vpub", "48,478,560,508", ""
+   cxdInput "sign:vsig", "572,478,1010,508", ""
+   cxdButton "sign:vgo", "1022,478,1152,508", "Check", "idle"
+   cxdLabel "sign:status", "48,596,1152,628", "Make a key on the Keys tab, then Sign here.", kClrInkSoft, 12, "plain"
 end buildSignTab
 
 -- ---- Schnorr (BIP-340) tab
 on buildSchnorrTab
-   cxdHdr "schn:h", "48,138,852,166", "Schnorr signatures (BIP-340): what a Taproot spend signs with"
-   cxdCap "schn:p", "48,168,852,222", "Bitcoin Taproot replaced ECDSA with Schnorr: 32-byte x-only public keys and 64-byte signatures that verify with one clean equation. CoinXT signs the 32-byte digest deterministically (the BIP-340 zero-aux default), and the SAME key, tweaked per BIP-341 (Q = P + hash(P)*G), becomes the bc1p address a Taproot spend unlocks.", kClrInkSoft
-   cxdBadge "schn:b1", "48,232,74,258", "1"
-   cxdButton "schn:go", "82,230,210,260", "Sign (BIP-340)", "primary"
-   cxdBadge "schn:b2", "224,232,250,258", "2"
-   cxdButton "schn:verify", "258,230,386,260", "Verify", "idle"
-   cxdBadge "schn:b3", "400,232,426,258", "3"
-   cxdButton "schn:tamper", "434,230,606,260", "Flip a bit & verify", "idle"
-   cxdCap "schn:msgLabel", "48,274,852,294", "Message to sign (SHA-256 makes the 32-byte digest BIP-340 signs):", kClrInkMute
-   cxdInput "schn:msg", "48,296,852,328", "Taproot pays whoever proves this"
-   cxdCap "schn:outLabel", "48,338,852,358", "x-only pubkey / digest / signature (r||s) / Taproot output key + bc1p address:", kClrInkMute
-   cxdMono "schn:out", "48,360,852,502"
-   cxdLabel "schn:status", "48,566,852,600", "Make a key on the Keys tab, then Sign here.", kClrInkSoft, 12, "plain"
+   cxdHdr "schn:h", "48,128,1152,156", "Schnorr signatures (BIP-340): what a Taproot spend signs with"
+   cxdCap "schn:p", "48,158,1152,206", "Bitcoin Taproot replaced ECDSA with Schnorr: 32-byte x-only public keys and 64-byte signatures that verify with one clean equation. CoinXT signs the 32-byte digest deterministically (the BIP-340 zero-aux default), and the SAME key, tweaked per BIP-341 (Q = P + hash(P)*G), becomes the bc1p address a Taproot spend unlocks.", kClrInkSoft
+   cxdBadge "schn:b1", "48,216,74,242", "1"
+   cxdButton "schn:go", "82,214,230,244", "Sign (BIP-340)", "primary"
+   cxdBadge "schn:b2", "244,216,270,242", "2"
+   cxdButton "schn:verify", "278,214,426,244", "Verify", "idle"
+   cxdBadge "schn:b3", "440,216,466,242", "3"
+   cxdButton "schn:tamper", "474,214,666,244", "Flip a bit & verify", "idle"
+   cxdCap "schn:msgLabel", "48,254,1152,272", "Message to sign (SHA-256 makes the 32-byte digest BIP-340 signs):", kClrInkMute
+   cxdInput "schn:msg", "48,274,1152,304", "Taproot pays whoever proves this"
+   cxdCap "schn:outLabel", "48,312,1152,330", "x-only pubkey / digest / signature (r||s) / Taproot output key + bc1p address:", kClrInkMute
+   cxdMono "schn:out", "48,332,1152,502"
+   cxdLabel "schn:status", "48,596,1152,628", "Make a key on the Keys tab, then Sign here.", kClrInkSoft, 12, "plain"
 end buildSchnorrTab
 
 -- ---- Ethereum tab
 on buildEthTab
-   cxdHdr "eth:h", "48,138,852,166", "Ethereum: personal_sign, ecrecover, and a fully signed transaction"
-   cxdCap "eth:p", "48,168,852,216", "Two complete Ethereum flows, entirely offline. personal_sign: the message is prefixed the EIP-191 way (so it can never double as a transaction), Keccak-256 hashed, and signed RECOVERABLY - from the signature alone, ecrecover yields the signer's ADDRESS; that is every 'Sign in with Ethereum' login. Transaction: the fields below are RLP-encoded, hashed, signed, and reassembled into the exact raw bytes a node would broadcast (EIP-155 replay protection, chain 1).", kClrInkSoft
-   cxdCap "eth:msgLabel", "48,224,852,242", "Message (personal_sign):", kClrInkMute
-   cxdInput "eth:msg", "48,244,500,274", "I control this address, nonce 7"
-   cxdButton "eth:sign", "512,244,680,274", "Sign (EIP-191)", "eth"
-   cxdButton "eth:recover", "692,244,852,274", "Recover signer", "idle"
-   cxdCap "eth:txLabel", "48,282,852,300", "Transaction: to-address / value in wei (fixed demo fields: nonce 9, 20 gwei, 21000 gas, chain 1):", kClrInkMute
-   cxdInput "eth:to", "48,302,460,332", "0x3535353535353535353535353535353535353535"
-   cxdInput "eth:value", "472,302,660,332", "1000000000000000000"
-   cxdButton "eth:tx", "672,302,852,332", "Sign transaction", "eth"
-   cxdCap "eth:outLabel", "48,340,852,358", "digest / signature / recovered address / raw signed transaction:", kClrInkMute
-   cxdMono "eth:out", "48,362,852,502"
-   cxdLabel "eth:status", "48,566,852,600", "Make a key on the Keys tab first.", kClrInkSoft, 12, "plain"
+   cxdHdr "eth:h", "48,128,1152,156", "Ethereum: personal_sign, ecrecover, and a fully signed transaction"
+   cxdCap "eth:p", "48,158,1152,206", "Two complete Ethereum flows, entirely offline. personal_sign: the message is prefixed the EIP-191 way (so it can never double as a transaction), Keccak-256 hashed, and signed RECOVERABLY - from the signature alone, ecrecover yields the signer's ADDRESS; that is every 'Sign in with Ethereum' login. Transaction: the fields below are RLP-encoded, hashed, signed, and reassembled into the exact raw bytes a node would broadcast (EIP-155 replay protection, chain 1).", kClrInkSoft
+   cxdCap "eth:msgLabel", "48,214,1152,232", "Message (personal_sign):", kClrInkMute
+   cxdInput "eth:msg", "48,234,700,264", "I control this address, nonce 7"
+   cxdButton "eth:sign", "712,234,920,264", "Sign (EIP-191)", "eth"
+   cxdButton "eth:recover", "932,234,1152,264", "Recover signer", "idle"
+   cxdCap "eth:txLabel", "48,272,1152,290", "Transaction: to-address / value in wei (fixed demo fields: nonce 9, 20 gwei, 21000 gas, chain 1):", kClrInkMute
+   cxdInput "eth:to", "48,292,560,322", "0x3535353535353535353535353535353535353535"
+   cxdInput "eth:value", "572,292,800,322", "1000000000000000000"
+   cxdButton "eth:tx", "812,292,1012,322", "Sign transaction", "eth"
+   cxdCap "eth:outLabel", "48,330,1152,348", "digest / signature / recovered address / raw signed transaction:", kClrInkMute
+   cxdMono "eth:out", "48,350,1152,540"
+   cxdLabel "eth:status", "48,596,1152,628", "Make a key on the Keys tab first.", kClrInkSoft, 12, "plain"
 end buildEthTab
 
 -- ---- BTC Tx tab (offline BIP-143 signing)
 on buildBtxTab
-   cxdHdr "btx:h", "48,138,852,166", "Sign a real Bitcoin transaction, offline (BIP-143)"
-   cxdCap "btx:p", "48,168,852,216", "One SegWit input owned by YOUR current key (Keys tab), any standard outputs: the fields are BIP-143 hashed, signed deterministically, DER-framed, and assembled into broadcast-ready raw bytes - all offline. Whatever the outputs do not spend becomes the fee, shown before you sign. The prefill is the OFFICIAL BIP-143 example: click Load, then Sign, and the raw bytes must equal the transaction printed in the BIP itself.", kClrInkSoft
-   cxdButton "btx:example", "48,224,268,254", "Load the BIP-143 example", "idle"
-   cxdButton "btx:nested", "280,224,500,254", "Input: nested (BIP-49)", "idle"
-   cxdButton "btx:go", "690,224,852,254", "Sign transaction", "primary"
-   cxdCap "btx:inLabel", "48,262,852,280", "Funding outpoint - txid / vout / amount in satoshis (the coin your key controls):", kClrInkMute
-   cxdInput "btx:txid", "48,282,540,312", "77541aeb3c4dac9260b68f74f44c973081a9d4cb2ebe8038b2d70faa201b6bdb"
-   cxdInput "btx:vout", "552,282,620,312", "1"
-   cxdInput "btx:amt", "632,282,852,312", "1000000000"
-   cxdCap "btx:outLabel", "48,320,852,338", "Outputs, one per line: amountSats address (any address type; the unspent rest is the fee):", kClrInkMute
-   cxdInput "btx:outs", "48,340,852,398", "199996600 1Fyxts6r24DpEieygQiNnWxUdb18ANa5p7" & return & "800000000 1Q5YjKVj5yQWHBBsyEBamkfph3cA6G9KK8"
-   cxdCap "btx:advLabel", "48,406,852,424", "version / sequence / locktime:", kClrInkMute
-   cxdInput "btx:ver", "48,426,140,456", "1"
-   cxdInput "btx:seq", "152,426,320,456", "4294967294"
-   cxdInput "btx:lock", "332,426,480,456", "1170"
-   cxdMono "btx:out", "48,464,852,556"
-   cxdLabel "btx:status", "48,566,852,626", "Load the example (it also adopts the example's PUBLIC key), or fill in your own test coin. Nothing is broadcast; the output is raw bytes you can inspect in any tx decoder.", kClrInkSoft, 12, "plain"
+   cxdHdr "btx:h", "48,128,1152,156", "Sign a real Bitcoin transaction, offline (BIP-143)"
+   cxdCap "btx:p", "48,158,1152,206", "One SegWit input owned by YOUR current key (Keys tab), any standard outputs: the fields are BIP-143 hashed, signed deterministically, DER-framed, and assembled into broadcast-ready raw bytes - all offline. Whatever the outputs do not spend becomes the fee, shown before you sign. The prefill is the OFFICIAL BIP-143 example: click Load, then Sign, and the raw bytes must equal the transaction printed in the BIP itself.", kClrInkSoft
+   cxdButton "btx:go", "48,214,248,244", "Sign transaction", "primary"
+   cxdButton "btx:example", "260,214,500,244", "Load the BIP-143 example", "idle"
+   cxdButton "btx:nested", "512,214,732,244", "Input: nested (BIP-49)", "idle"
+   cxdCap "btx:inLabel", "48,252,1152,270", "Funding outpoint - txid / vout / amount in satoshis (the coin your key controls):", kClrInkMute
+   cxdInput "btx:txid", "48,272,700,302", "77541aeb3c4dac9260b68f74f44c973081a9d4cb2ebe8038b2d70faa201b6bdb"
+   cxdInput "btx:vout", "712,272,780,302", "1"
+   cxdInput "btx:amt", "792,272,1012,302", "1000000000"
+   cxdCap "btx:outLabel", "48,310,1152,328", "Outputs, one per line: amountSats address (any address type; the unspent rest is the fee):", kClrInkMute
+   cxdInput "btx:outs", "48,330,1152,388", "199996600 1Fyxts6r24DpEieygQiNnWxUdb18ANa5p7" & return & "800000000 1Q5YjKVj5yQWHBBsyEBamkfph3cA6G9KK8"
+   cxdCap "btx:advLabel", "48,396,1152,414", "version / sequence / locktime:", kClrInkMute
+   cxdInput "btx:ver", "48,416,140,446", "1"
+   cxdInput "btx:seq", "152,416,320,446", "4294967294"
+   cxdInput "btx:lock", "332,416,480,446", "1170"
+   cxdMono "btx:out", "48,454,1152,586"
+   cxdLabel "btx:status", "48,596,1152,628", "Load the example (it also adopts the example's PUBLIC key), or fill in your own test coin. Nothing is broadcast; the output is raw bytes you can inspect in any tx decoder.", kClrInkSoft, 12, "plain"
 end buildBtxTab
 
 -- ---- Shared Secret (ECDH) tab
 on buildEcdhTab
-   cxdHdr "ecdh:h", "48,138,852,166", "Two parties, one shared secret (ECDH)"
-   cxdCap "ecdh:p", "48,168,852,222", "Alice combines HER secret key with BOB's public key; Bob does the reverse. Both land on the same 32 bytes (the raw SEC1 x-coordinate) without either secret key ever moving. A real protocol hashes this secret before using it as a symmetric key.", kClrInkSoft
-   cxdButton "ecdh:go", "48,230,300,260", "Run the exchange (test keys)", "primary"
-   cxdCap "ecdh:outLabel", "48,274,852,294", "Alice's view (sk_A, pub_B) / Bob's view (sk_B, pub_A):", kClrInkMute
-   cxdMono "ecdh:out", "48,296,852,452"
-   cxdCap "ecdh:peerLabel", "48,462,852,480", "Or combine YOUR key (Keys tab) with a pasted peer public key (33/65-byte hex):", kClrInkMute
-   cxdInput "ecdh:peer", "48,482,620,512", ""
-   cxdButton "ecdh:mine", "632,482,852,512", "Secret with MY key", "primary"
-   cxdLabel "ecdh:status", "48,566,852,600", "Click above to run a Diffie-Hellman exchange between two demo keys.", kClrInkSoft, 12, "plain"
+   cxdHdr "ecdh:h", "48,128,1152,156", "Two parties, one shared secret (ECDH)"
+   cxdCap "ecdh:p", "48,158,1152,206", "Alice combines HER secret key with BOB's public key; Bob does the reverse. Both land on the same 32 bytes (the raw SEC1 x-coordinate) without either secret key ever moving. A real protocol hashes this secret before using it as a symmetric key.", kClrInkSoft
+   cxdButton "ecdh:go", "48,214,320,244", "Run the exchange (test keys)", "primary"
+   cxdCap "ecdh:outLabel", "48,254,1152,272", "Alice's view (sk_A, pub_B) / Bob's view (sk_B, pub_A):", kClrInkMute
+   cxdMono "ecdh:out", "48,274,1152,424"
+   cxdCap "ecdh:peerLabel", "48,434,1152,452", "Or combine YOUR key (Keys tab) with a pasted peer public key (33/65-byte hex):", kClrInkMute
+   cxdInput "ecdh:peer", "48,454,940,484", ""
+   cxdButton "ecdh:mine", "952,454,1152,484", "Secret with MY key", "primary"
+   cxdLabel "ecdh:status", "48,596,1152,628", "Click above to run a Diffie-Hellman exchange between two demo keys.", kClrInkSoft, 12, "plain"
 end buildEcdhTab
 
 -- ---- Hashes tab
 on buildHashTab
-   cxdHdr "hash:h", "48,138,852,166", "The coin hashes, including the classic Ethereum footgun"
-   cxdCap "hash:p", "48,168,852,214", "Ethereum's Keccak-256 and NIST's SHA3-256 differ by ONE padding byte, and confusing them is the classic wallet bug. CoinXT exposes them as two functions that can never be aliased. Hash any text and compare.", kClrInkSoft
-   cxdCap "hash:msgLabel", "48,224,852,244", "Text to hash (or 0x... to hash raw hex bytes, so you can check vectors from any tool):", kClrInkMute
-   cxdInput "hash:msg", "48,246,700,278", "abc"
-   cxdButton "hash:go", "712,246,852,278", "Hash it", "primary"
-   cxdMono "hash:out", "48,290,852,452"
-   cxdLabel "hash:status", "48,566,852,600", "Keccak-256 and SHA3-256 will look completely different - that is the point.", kClrInkSoft, 12, "plain"
+   cxdHdr "hash:h", "48,128,1152,156", "The coin hashes, including the classic Ethereum footgun"
+   cxdCap "hash:p", "48,158,1152,202", "Ethereum's Keccak-256 and NIST's SHA3-256 differ by ONE padding byte, and confusing them is the classic wallet bug. CoinXT exposes them as two functions that can never be aliased. Hash any text and compare.", kClrInkSoft
+   cxdCap "hash:msgLabel", "48,210,1152,228", "Text to hash (or 0x... to hash raw hex bytes, so you can check vectors from any tool):", kClrInkMute
+   cxdInput "hash:msg", "48,230,940,260", "abc"
+   cxdButton "hash:go", "952,230,1152,260", "Hash it", "primary"
+   cxdMono "hash:out", "48,270,1152,500"
+   cxdLabel "hash:status", "48,596,1152,628", "Keccak-256 and SHA3-256 will look completely different - that is the point.", kClrInkSoft, 12, "plain"
 end buildHashTab
 
 -- ---- HD Wallet tab (restore ANY BIP-39 phrase, or generate 12/24 words)
 on buildSeedTab
-   cxdHdr "seed:h", "48,138,852,166", "Restore a whole wallet from its seed phrase (BIP-32/39/44/49/84/86)"
-   cxdCap "seed:p", "48,168,852,222", "Type or paste ANY BIP-39 phrase and Restore rebuilds the whole wallet: the checksum is verified (a typo in any word is caught), PBKDF2-HMAC-SHA512 makes the 64-byte master seed, and CoinXT walks the BIP-32 tree to the first receiving address of EVERY standard account type plus the watch-only account xpub and the first key's WIF. The field starts with the canonical TEST phrase, so you can check every line against any mainstream wallet.", kClrInkSoft
-   cxdButton "seed:restore", "48,230,216,260", "Restore wallet", "primary"
-   cxdButton "seed:gen12", "228,230,378,260", "Generate 12 words", "idle"
-   cxdButton "seed:gen24", "390,230,540,260", "Generate 24 words", "idle"
-   cxdCap "seed:ppLabel", "552,238,660,258", "Passphrase:", kClrInkMute
-   cxdInput "seed:pp", "664,232,852,262", ""
-   cxdCap "seed:mnemLabel", "48,272,852,292", "Seed phrase (12/15/18/21/24 words; PUBLIC demo phrases only - never type a funded one here):", kClrInkMute
-   cxdInput "seed:mnem", "48,294,852,348", "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-   cxdCap "seed:pathLabel", "48,362,180,380", "Explore a path:", kClrInkMute
-   cxdInput "seed:path", "184,356,560,386", "m/84'/0'/0'/0/0"
-   cxdButton "seed:derive", "572,356,740,386", "Derive this path", "idle"
-   cxdMono "seed:out", "48,394,852,556"
-   cxdLabel "seed:status", "48,566,852,626", "Click Restore to rebuild the canonical test wallet, or Generate for a fresh phrase (SodiumXT entropy if loaded, else a fixed DEMO value).", kClrInkSoft, 12, "plain"
+   cxdHdr "seed:h", "48,128,1152,156", "Restore a whole wallet from its seed phrase (BIP-32/39/44/49/84/86)"
+   cxdCap "seed:p", "48,158,1152,210", "Type or paste ANY BIP-39 phrase and Restore rebuilds the whole wallet: the checksum is verified (a typo in any word is caught), PBKDF2-HMAC-SHA512 makes the 64-byte master seed, and CoinXT walks the BIP-32 tree to the first receiving address of EVERY standard account type plus the watch-only account xpub, the first key's WIF, and a ten-address fidelity listing per chain. The field starts with the canonical TEST phrase, so you can check every line against any mainstream wallet.", kClrInkSoft
+   cxdButton "seed:restore", "48,218,236,248", "Restore wallet", "primary"
+   cxdButton "seed:gen12", "248,218,428,248", "Generate 12 words", "idle"
+   cxdButton "seed:gen24", "440,218,620,248", "Generate 24 words", "idle"
+   cxdCap "seed:ppLabel", "640,224,738,244", "Passphrase:", kClrInkMute
+   cxdInput "seed:pp", "742,218,1012,248", ""
+   cxdCap "seed:mnemLabel", "48,256,1152,274", "Seed phrase (12/15/18/21/24 words; PUBLIC demo phrases only - never type a funded one here):", kClrInkMute
+   cxdInput "seed:mnem", "48,276,1152,320", "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+   cxdCap "seed:pathLabel", "48,334,178,352", "Explore a path:", kClrInkMute
+   cxdInput "seed:path", "182,328,620,358", "m/84'/0'/0'/0/0"
+   cxdButton "seed:derive", "632,328,812,358", "Derive this path", "idle"
+   cxdMono "seed:out", "48,366,1152,586"
+   cxdLabel "seed:status", "48,596,1152,628", "Click Restore to rebuild the canonical test wallet, or Generate for a fresh phrase (SodiumXT entropy if loaded, else a fixed DEMO value).", kClrInkSoft, 12, "plain"
 end buildSeedTab
 
 -- ---- Decode / inspect tab
 on buildDecodeTab
-   cxdHdr "dec:h", "48,138,852,166", "Paste anything: verify its checksum and take it apart"
-   cxdCap "dec:p", "48,168,852,222", "Every format CoinXT emits, it also verifies and decodes, fail closed: Base58Check (legacy and P2SH addresses, WIF keys, xprv/xpub), Bech32/Bech32m (bc1q/bc1p SegWit addresses, BIP-350 rules including the v1 constant), and EIP-55 (the Ethereum mixed-case checksum). Change ONE character of a valid string and watch it be rejected instead of coerced - on a payment rail, that rejection is the feature.", kClrInkSoft
-   cxdButton "dec:go", "48,230,236,260", "Decode + verify", "primary"
-   cxdCap "dec:inLabel", "48,274,852,294", "Address / WIF / xprv / xpub / 0x... to inspect:", kClrInkMute
-   cxdInput "dec:in", "48,296,852,328", "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
-   cxdMono "dec:out", "48,340,852,502"
-   cxdCap "dec:note", "48,510,852,552", "Try: a 1... or 3... address, a bc1q/bc1p address (flip a character to see the checksum catch it), a WIF key (KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn is the famous PUBLIC key-1), an xpub, or an Ethereum 0x address in any casing.", kClrInkMute
-   cxdLabel "dec:status", "48,566,852,600", "Paste a string above and click Decode.", kClrInkSoft, 12, "plain"
+   cxdHdr "dec:h", "48,128,1152,156", "Paste anything: verify its checksum and take it apart"
+   cxdCap "dec:p", "48,158,1152,210", "Every format CoinXT emits, it also verifies and decodes, fail closed: Base58Check (legacy and P2SH addresses, WIF keys, xprv/xpub), Bech32/Bech32m (bc1q/bc1p SegWit addresses, BIP-350 rules including the v1 constant), and EIP-55 (the Ethereum mixed-case checksum). Change ONE character of a valid string and watch it be rejected instead of coerced - on a payment rail, that rejection is the feature.", kClrInkSoft
+   cxdButton "dec:go", "48,218,248,248", "Decode + verify", "primary"
+   cxdCap "dec:inLabel", "48,258,1152,276", "Address / WIF / xprv / xpub / 0x... to inspect:", kClrInkMute
+   cxdInput "dec:in", "48,278,1152,308", "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+   cxdMono "dec:out", "48,318,1152,500"
+   cxdCap "dec:note", "48,508,1152,552", "Try: a 1... or 3... address, a bc1q/bc1p address (flip a character to see the checksum catch it), a WIF key (KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn is the famous PUBLIC key-1), an xpub, or an Ethereum 0x address in any casing.", kClrInkMute
+   cxdLabel "dec:status", "48,596,1152,628", "Paste a string above and click Decode.", kClrInkSoft, 12, "plain"
 end buildDecodeTab
 
 -- ---- About tab (pitch + embedded self-test)
 on buildAboutTab
-   cxdHdr "about:h", "48,138,852,166", "CoinXT: Bitcoin and Ethereum primitives for xTalk"
-   cxdCap "about:exp", "48,168,852,300", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
-   cxdButton "about:selftest", "48,306,300,338", "Run the full self-test", "primary"
-   cxdMono "about:out", "48,350,852,452"
-   cxdLabel "about:status", "48,566,852,600", "Click Run the full self-test to check every primitive against a public vector.", kClrInkSoft, 12, "plain"
+   cxdHdr "about:h", "48,128,1152,156", "CoinXT: Bitcoin and Ethereum primitives for xTalk"
+   cxdCap "about:exp", "48,158,1152,290", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
+   cxdButton "about:selftest", "48,298,300,328", "Run the full self-test", "primary"
+   cxdMono "about:out", "48,338,1152,586"
+   cxdLabel "about:status", "48,596,1152,628", "Click Run the full self-test to check every primitive against a public vector.", kClrInkSoft, 12, "plain"
 end buildAboutTab
 
 -- ------------------------------------------------------------------ tab switching
@@ -1360,12 +1352,12 @@ on doHashAll
    put "sha3-256   " & cxdHex(cxSha3_256(tIn)) & return after tOut
    put "           ^ same input, ONE padding byte apart: never alias these two" & return after tOut
    put "sha256     " & cxdHex(cxSha256(tIn)) & return after tOut
-   put "sha512     " & cxdShort(cxSha512(tIn), 96) & return after tOut
+   put "sha512     " & cxdHex(cxSha512(tIn)) & return after tOut
    put "ripemd160  " & cxdHex(cxRipemd160(tIn)) & return after tOut
    put "hash160    " & cxdHex(cxHash160(tIn)) && "(a Bitcoin address hashes this)" & return after tOut
    put "hash256    " & cxdHex(cxHash256(tIn)) && "(txids, Base58Check checksums)" & return after tOut
    put "hmac256    " & cxdHex(cxHmacSha256(cxdAscii("demo-key"), tIn)) && "(keyed MAC, key = demo-key)" & return after tOut
-   put "hmac512    " & cxdShort(cxHmacSha512(cxdAscii("demo-key"), tIn), 96) && "(BIP-32 derives with this)" after tOut
+   put "hmac512    " & cxdHex(cxHmacSha512(cxdAscii("demo-key"), tIn)) && "(BIP-32 derives with this)" after tOut
    put tOut into field "hash:out"
    cxdStatus "hash:status", "Notice how keccak256 and sha3-256 differ completely.", "ok"
 end doHashAll
