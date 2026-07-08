@@ -238,6 +238,11 @@ PSBT (BIP-174, the cold-signer surface; single-key SegWit inputs sign, everythin
                                              pubkey hash) or 73-byte HD node (walks the PSBT's own
                                              BIP32_DERIVATION paths); untouched inputs stay byte-exact
   cxPsbtFinalize(pPsbt)                   -> txid & LF & extracted network tx (single-key inputs)
+
+EIP-712 typed structured data (COMPOSABLE: a nested struct's hash is its parent's word):
+  cxEip712TypeHash(pTypeString) / cxEip712HashStruct(pTypeString, pWords)
+  cxEip712WordUInt(pDec) / cxEip712WordAddress(p0x) / cxEip712WordHash(pData)
+  cxEip712Digest(pDomainSeparator, pStructHash)   -> sign with cxSignRecoverable (v = recid + 27)
 ```
 
 ## 7. Formats CoinXT must get byte-exact (the spec inside the spec)

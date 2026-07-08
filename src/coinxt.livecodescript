@@ -824,6 +824,91 @@ function cxEthPersonalHash pMessage
    return cxKeccak256(tPreimage)
 end cxEthPersonalHash
 
+-- ---- EIP-712 typed structured data ----
+--
+-- COMPOSABLE, like the RLP surface: hash each struct from its canonical
+-- type string plus its already-encoded 32-byte words; a nested struct's
+-- hash IS its parent's word, so no structure ever crosses an API. The
+-- domain separator is itself a hashStruct; the final digest is
+-- keccak256(0x19 0x01 || domainSeparator || hashStruct(message)), signed
+-- with cxSignRecoverable (v = recid + 27). This is what every wallet's
+-- signTypedData does: token Permits, exchange orders, DAO votes, Sign-In
+-- with Ethereum. Locked to the OFFICIAL example in the EIP (the Mail
+-- struct signed by the key keccak256("cow")) in tools/coin-kat.py and the
+-- on-engine harness.
+
+-- keccak256 of a canonical type string, e.g.
+-- "Mail(Person from,Person to,string contents)Person(string name,address wallet)"
+-- (referenced struct types appended in alphabetical order, per the EIP)
+function cxEip712TypeHash pTypeString
+   return cxKeccak256(textEncode(pTypeString, "utf-8"))
+end cxEip712TypeHash
+
+-- hashStruct: keccak256( typeHash || word1 || word2 || ... ); pWords is the
+-- concatenation of the member words, in the order the type string declares
+function cxEip712HashStruct pTypeString, pWords
+   if (the number of bytes in pWords) mod 32 is not 0 then
+      return "CoinXT: encoded words must be a multiple of 32 bytes (cxEip712HashStruct)"
+   end if
+   return cxKeccak256(cxEip712TypeHash(pTypeString) & pWords)
+end cxEip712HashStruct
+
+-- one 32-byte word from a DECIMAL string of any size (uint256; bools are 1/0)
+function cxEip712WordUInt pDecimal
+   local tRlp
+   local tVal
+   put cxRlpUIntDec(pDecimal) into tRlp
+   if cxIsError(tRlp) then
+      return tRlp && "(cxEip712WordUInt)"
+   end if
+   -- unwrap the RLP framing to the minimal big-endian bytes: a single byte
+   -- below 0x80 is itself; 0x80 is zero; 0x81..0xa0 prefix the payload
+   if the number of bytes in tRlp is 1 and byteToNum(byte 1 of tRlp) < 128 then
+      put tRlp into tVal
+   else
+      put byte 2 to -1 of tRlp into tVal
+   end if
+   if the number of bytes in tVal > 32 then
+      return "CoinXT: value does not fit uint256 (cxEip712WordUInt)"
+   end if
+   repeat while the number of bytes in tVal < 32
+      put numToByte(0) before tVal
+   end repeat
+   return tVal
+end cxEip712WordUInt
+
+-- one 32-byte word from an 0x address (left-padded; a WRONG mixed-case
+-- EIP-55 checksum fails closed, single-case is accepted as unprotected)
+function cxEip712WordAddress pAddress
+   local tChecked
+   local tBody
+   put cxEthAddressChecksum(pAddress) into tChecked
+   if cxIsError(tChecked) then
+      return tChecked && "(cxEip712WordAddress)"
+   end if
+   set the caseSensitive to true
+   if pAddress is not tChecked and pAddress is not toLower(pAddress) and pAddress is not toUpper(pAddress) then
+      return "CoinXT: the address fails its EIP-55 checksum (cxEip712WordAddress)"
+   end if
+   put cxHexDecode(toLower(char 3 to -1 of pAddress)) into tBody
+   return cxHexDecode("000000000000000000000000") & tBody
+end cxEip712WordAddress
+
+-- one 32-byte word for a dynamic member (string/bytes): its keccak256
+function cxEip712WordHash pData
+   return cxKeccak256(pData)
+end cxEip712WordHash
+
+-- the signable digest: keccak256( 0x19 0x01 || domainSeparator ||
+-- hashStruct(message) ). Sign it with cxSignRecoverable; Ethereum shows
+-- v as recid + 27.
+function cxEip712Digest pDomainSeparator, pStructHash
+   if the number of bytes in pDomainSeparator is not 32 or the number of bytes in pStructHash is not 32 then
+      return "CoinXT: both hashes must be 32 bytes (cxEip712Digest)"
+   end if
+   return cxKeccak256(numToByte(25) & numToByte(1) & pDomainSeparator & pStructHash)
+end cxEip712Digest
+
 -- ---- Bitcoin addresses ----
 
 -- legacy P2PKH: Base58Check( version || hash160(pubkey) ). pMainnet defaults true.

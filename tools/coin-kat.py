@@ -1774,6 +1774,46 @@ def run_psbt_checks(lib, kat):
 
 
 # ---------------------------------------------------------------------------
+# EIP-712 typed structured data: the composable word/hashStruct/digest chain,
+# locked to the OFFICIAL example in the EIP itself (the Mail struct, domain
+# "Ether Mail", signed by the key keccak256("cow")): published digest, r, s,
+# v = 28, and the famous signer address.
+EIP712_DIGEST = \
+    "be609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2"
+EIP712_R = "4355c47d63924e8a72e509b65029052eb6c299d53a04e167c5775fd466751c9d"
+EIP712_S = "07299936d304c153f6443dfa05f40ff007d72911b6f72307f996231605b91562"
+EIP712_SIGNER = "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826"
+
+
+def run_eip712_checks(lib, kat):
+    K = lambda b: digest(lib, "cnx_keccak256", b)
+    w_addr = lambda h: bytes(12) + bytes.fromhex(h)
+    w_str = lambda t: K(t.encode())
+    w_u = lambda n: n.to_bytes(32, "big")
+    dom = K(K(b"EIP712Domain(string name,string version,uint256 chainId,"
+              b"address verifyingContract)")
+            + w_str("Ether Mail") + w_str("1") + w_u(1)
+            + w_addr("cccccccccccccccccccccccccccccccccccccccc"))
+    person = b"Person(string name,address wallet)"
+    mail = b"Mail(Person from,Person to,string contents)" + person
+    cow = K(K(person) + w_str("Cow")
+            + w_addr("cd2a3d9f938e13cd947ec05abc7fe734df8dd826"))
+    bob = K(K(person) + w_str("Bob")
+            + w_addr("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+    msg = K(K(mail) + cow + bob + w_str("Hello, Bob!"))
+    dg = K(b"\x19\x01" + dom + msg)
+    kat.check("EIP-712 digest matches the EIP example", dg.hex() == EIP712_DIGEST)
+    sk = K(b"cow")
+    sig = ctypes.create_string_buffer(65)
+    rc = lib.cnx_ecdsa_sign_recoverable(sk, dg, sig)
+    kat.check("EIP-712 r matches", rc == 0 and sig.raw[:32].hex() == EIP712_R)
+    kat.check("EIP-712 s matches", sig.raw[32:64].hex() == EIP712_S)
+    kat.check("EIP-712 v = 28", sig.raw[64] + 27 == 28)
+    kat.check("EIP-712 signer address",
+              _eth_address(pubkey(lib, sk, False)) == EIP712_SIGNER)
+
+
+# ---------------------------------------------------------------------------
 # The wallet-restore path (the demo's headline feature): the canonical BIP-39
 # test mnemonic restores, through the SHIM's real HD-node derivation, to the
 # OFFICIAL BIP-84 and BIP-86 first addresses (those two strings are printed
@@ -1891,6 +1931,7 @@ def main(argv):
         run_rlp_eip155_checks(lib, kat)
         run_btc_tx_checks(lib, kat)
         run_psbt_checks(lib, kat)
+        run_eip712_checks(lib, kat)
         run_restore_checks(lib, kat)
 
     if kat.problems:
