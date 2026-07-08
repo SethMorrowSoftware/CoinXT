@@ -85,6 +85,7 @@ size_t cnx_recoverable_sig_len(void) { return 65; }
 size_t cnx_digest_len(void) { return 32; }
 size_t cnx_ecdh_secret_len(void) { return 32; }
 size_t cnx_hdnode_len(void) { return 73; }
+size_t cnx_chaincode_len(void) { return 32; }
 
 /* ---- the trezor-crypto integrator RNG hook --------------------------------
  * The phase-0 assumption was that nothing calls this once signing is RFC 6979

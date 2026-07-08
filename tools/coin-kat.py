@@ -669,14 +669,31 @@ def run_bip39_checks(lib, kat):
 # comparing to the published string - depth, parent fingerprint, child number,
 # chain code, and private key all at once.
 BIP32_VECTOR1_SEED = "000102030405060708090a0b0c0d0e0f"
-# (path, hardened-flags, official xprv). The path is applied step by step.
+# mainnet extended-key version bytes (BIP-32), the same two cxXprv/cxXpub emit.
+XPRV_VERSION = bytes.fromhex("0488ade4")
+XPUB_VERSION = bytes.fromhex("0488b21e")
+# (path, official xprv, official xpub). The path is applied step by step; each
+# level pins BOTH extended keys, so the reconstruction below locks the exact
+# strings cxXprv / cxXpub must emit on-engine.
 BIP32_VECTOR1 = [
-    ([], "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi"),
-    ([(0, True)], "xprv9uHRZZhk6KAJC1avXpDAp4MDc3sQKNxDiPvvkX8Br5ngLNv1TxvUxt4cV1rGL5hj6KCesnDYUhd7oWgT11eZG7XnxHrnYeSvkzY7d2bhkJ7"),
-    ([(0, True), (1, False)], "xprv9wTYmMFdV23N2TdNG573QoEsfRrWKQgWeibmLntzniatZvR9BmLnvSxqu53Kw1UmYPxLgboyZQaXwTCg8MSY3H2EU4pWcQDnRnrVA1xe8fs"),
-    ([(0, True), (1, False), (2, True)], "xprv9z4pot5VBttmtdRTWfWQmoH1taj2axGVzFqSb8C9xaxKymcFzXBDptWmT7FwuEzG3ryjH4ktypQSAewRiNMjANTtpgP4mLTj34bhnZX7UiM"),
-    ([(0, True), (1, False), (2, True), (2, False)], "xprvA2JDeKCSNNZky6uBCviVfJSKyQ1mDYahRjijr5idH2WwLsEd4Hsb2Tyh8RfQMuPh7f7RtyzTtdrbdqqsunu5Mm3wDvUAKRHSC34sJ7in334"),
-    ([(0, True), (1, False), (2, True), (2, False), (1000000000, False)], "xprvA41z7zogVVwxVSgdKUHDy1SKmdb533PjDz7J6N6mV6uS3ze1ai8FHa8kmHScGpWmj4WggLyQjgPie1rFSruoUihUZREPSL39UNdE3BBDu76"),
+    ([],
+     "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi",
+     "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8"),
+    ([(0, True)],
+     "xprv9uHRZZhk6KAJC1avXpDAp4MDc3sQKNxDiPvvkX8Br5ngLNv1TxvUxt4cV1rGL5hj6KCesnDYUhd7oWgT11eZG7XnxHrnYeSvkzY7d2bhkJ7",
+     "xpub68Gmy5EdvgibQVfPdqkBBCHxA5htiqg55crXYuXoQRKfDBFA1WEjWgP6LHhwBZeNK1VTsfTFUHCdrfp1bgwQ9xv5ski8PX9rL2dZXvgGDnw"),
+    ([(0, True), (1, False)],
+     "xprv9wTYmMFdV23N2TdNG573QoEsfRrWKQgWeibmLntzniatZvR9BmLnvSxqu53Kw1UmYPxLgboyZQaXwTCg8MSY3H2EU4pWcQDnRnrVA1xe8fs",
+     "xpub6ASuArnXKPbfEwhqN6e3mwBcDTgzisQN1wXN9BJcM47sSikHjJf3UFHKkNAWbWMiGj7Wf5uMash7SyYq527Hqck2AxYysAA7xmALppuCkwQ"),
+    ([(0, True), (1, False), (2, True)],
+     "xprv9z4pot5VBttmtdRTWfWQmoH1taj2axGVzFqSb8C9xaxKymcFzXBDptWmT7FwuEzG3ryjH4ktypQSAewRiNMjANTtpgP4mLTj34bhnZX7UiM",
+     "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5"),
+    ([(0, True), (1, False), (2, True), (2, False)],
+     "xprvA2JDeKCSNNZky6uBCviVfJSKyQ1mDYahRjijr5idH2WwLsEd4Hsb2Tyh8RfQMuPh7f7RtyzTtdrbdqqsunu5Mm3wDvUAKRHSC34sJ7in334",
+     "xpub6FHa3pjLCk84BayeJxFW2SP4XRrFd1JYnxeLeU8EqN3vDfZmbqBqaGJAyiLjTAwm6ZLRQUMv1ZACTj37sR62cfN7fe5JnJ7dh8zL4fiyLHV"),
+    ([(0, True), (1, False), (2, True), (2, False), (1000000000, False)],
+     "xprvA41z7zogVVwxVSgdKUHDy1SKmdb533PjDz7J6N6mV6uS3ze1ai8FHa8kmHScGpWmj4WggLyQjgPie1rFSruoUihUZREPSL39UNdE3BBDu76",
+     "xpub6H1LXWLaKsWFhvm6RVpEL9P4KfRZSW7abD2ttkWP3SSQvnyA8FSVqNTEcYFgJS2UaFcxupHiYkro49S8yGasTvXEYBVPamhGW6cFJodrTHy"),
 ]
 
 
@@ -689,9 +706,24 @@ def _b58decode(s):
     return b"\x00" * pad + body
 
 
+def _b58check_body(body):
+    # Base58Check over a body whose version prefix is ALREADY prepended (xprv/
+    # xpub use a 4-byte version, not the 1-byte _b58check takes). This is the
+    # exact framing cxXprv / cxXpub perform: append the 4-byte double-SHA-256
+    # tail, then Base58 the whole thing.
+    data = body + _dsha(body)[:4]
+    n_zero = len(data) - len(data.lstrip(b"\x00"))
+    num = int.from_bytes(data, "big")
+    out = ""
+    while num:
+        num, rem = divmod(num, 58)
+        out = _B58[rem] + out
+    return "1" * n_zero + out
+
+
 def run_hd_checks(lib, kat):
     seed = bytes.fromhex(BIP32_VECTOR1_SEED)
-    for path, xprv in BIP32_VECTOR1:
+    for path, xprv, xpub in BIP32_VECTOR1:
         node = ctypes.create_string_buffer(73)
         rc = lib.cnx_hdnode_from_seed(seed, len(seed), node)
         if rc != 0:
@@ -710,7 +742,15 @@ def run_hd_checks(lib, kat):
         label = "m" + "".join(f"/{i}{'H' if h else ''}" for i, h in path)
         ok = (blob[0:41] == body[0:41] and body[41] == 0
               and blob[41:73] == body[42:74])
-        kat.check(f"BIP-32 vector 1 {label}", ok)
+        kat.check(f"BIP-32 vector 1 {label} (blob fields)", ok)
+        # Reconstruct the full xprv/xpub the way cxXprv/cxXpub do, from ONLY the
+        # blob fields + the shim's own pubkey derivation, and lock to the
+        # published strings. blob[0:41] = depth|fp|child|cc; blob[41:73] = priv.
+        pub = pubkey(lib, blob[41:73], True)
+        built_xprv = _b58check_body(XPRV_VERSION + blob[0:41] + b"\x00" + blob[41:73])
+        built_xpub = _b58check_body(XPUB_VERSION + blob[0:41] + pub)
+        kat.check(f"BIP-32 vector 1 {label} xprv string", built_xprv == xprv)
+        kat.check(f"BIP-32 vector 1 {label} xpub string", built_xpub == xpub)
     # a public-key accessor round trip against the shim's own pubkey derivation
     node = ctypes.create_string_buffer(73)
     lib.cnx_hdnode_from_seed(seed, len(seed), node)

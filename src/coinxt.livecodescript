@@ -994,3 +994,173 @@ end cxMnemonicValidate
 function cxMnemonicToSeed pWords, pPassphrase
    return cxPbkdf2HmacSha512(textEncode(pWords, "utf-8"), textEncode("mnemonic" & pPassphrase, "utf-8"), 2048, 64)
 end cxMnemonicToSeed
+
+----------------------------------------------------------------------
+-- HD wallets (BIP-32; phase 4b)
+--
+-- The node is the 73-byte opaque blob the shim returns
+-- (depth||parent_fingerprint||child||chaincode||privkey). It CARRIES A
+-- PRIVATE KEY, so this layer clears its node variables the moment it is done,
+-- exactly as it does for a seckey. xprv/xpub are framed HERE in script (the
+-- version bytes + Base58Check over the blob fields), so no extra native call
+-- is needed for serialization.
+----------------------------------------------------------------------
+
+-- master node from a BIP-39/other seed (I = HMAC-SHA512("Bitcoin seed", seed))
+function cxHdFromSeed pSeed
+   local tOut
+   try
+      put cxbHdFromSeed(pSeed) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxHdFromSeed)")
+   end try
+   return tOut
+end cxHdFromSeed
+
+-- one derivation step (index 0..2^31-1; pHardened sets the high bit)
+function cxHdDerive pNode, pIndex, pHardened
+   local tOut
+   try
+      put cxbHdDerive(pNode, pIndex, pHardened) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxHdDerive)")
+   end try
+   return tOut
+end cxHdDerive
+
+-- derive a whole path like "m/44'/0'/0'/0/0" (the apostrophe, or a trailing h
+-- or H, marks a hardened level). Returns the final node, or a CoinXT: error on
+-- a malformed path or a failed step. Intermediate parent nodes (each carrying
+-- a private key) are cleared as we go.
+function cxHdDerivePath pNode, pPath
+   local tSavedDelim
+   local tCount
+   local tI
+   local tPart
+   local tHardened
+   local tSteps
+   local tNode
+   local tNext
+   local tStepLine
+   -- PASS 1: parse + validate the path into steps ("index hardened" per line)
+   put empty into tSteps
+   put the itemDelimiter into tSavedDelim
+   set the itemDelimiter to "/"
+   put the number of items of pPath into tCount
+   repeat with tI = 1 to tCount
+      put item tI of pPath into tPart
+      if tI is 1 and (tPart is "m" or tPart is "M") then
+         next repeat
+      end if
+      if tPart is empty then
+         next repeat
+      end if
+      put false into tHardened
+      if last char of tPart is "'" or last char of tPart is "h" or last char of tPart is "H" then
+         put true into tHardened
+         delete last char of tPart
+      end if
+      if tPart is not an integer then
+         set the itemDelimiter to tSavedDelim
+         return "CoinXT: bad element in derivation path " & pPath & " (cxHdDerivePath)"
+      end if
+      if tPart < 0 or tPart > 2147483647 then
+         set the itemDelimiter to tSavedDelim
+         return "CoinXT: derivation index out of range (cxHdDerivePath)"
+      end if
+      put tPart & space & tHardened & return after tSteps
+   end repeat
+   set the itemDelimiter to tSavedDelim
+   -- PASS 2: derive step by step, clearing each parent node
+   put pNode into tNode
+   repeat for each line tStepLine in tSteps
+      put cxHdDerive(tNode, word 1 of tStepLine, (word 2 of tStepLine is "true")) into tNext
+      put empty into tNode
+      if cxIsError(tNext) then
+         return tNext
+      end if
+      put tNext into tNode
+   end repeat
+   return tNode
+end cxHdDerivePath
+
+-- the node's fields (the private key is secret; clear your copy when done)
+function cxHdSeckey pNode
+   local tOut
+   try
+      put cxbHdPrivateKey(pNode) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxHdSeckey)")
+   end try
+   return tOut
+end cxHdSeckey
+
+function cxHdPubkey pNode
+   local tOut
+   try
+      put cxbHdPublicKey(pNode) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxHdPubkey)")
+   end try
+   return tOut
+end cxHdPubkey
+
+function cxHdChainCode pNode
+   local tOut
+   try
+      put cxbHdChainCode(pNode) into tOut
+   catch tErr
+      return cxMakeError(tErr, "(cxHdChainCode)")
+   end try
+   return tOut
+end cxHdChainCode
+
+-- xprv (extended PRIVATE key), Base58Check. pMainnet defaults true. The result
+-- carries the private key: treat it as secret. version||depth||fp||child||cc||
+-- 0x00||priv, then Base58Check.
+function cxXprv pNode, pMainnet
+   local tVersion
+   local tPriv
+   local tBody
+   local tCheck
+   if pMainnet is false then
+      put binaryEncode("H*", "04358394") into tVersion
+   else
+      put binaryEncode("H*", "0488ade4") into tVersion
+   end if
+   put cxHdSeckey(pNode) into tPriv
+   if cxIsError(tPriv) then
+      return tPriv && "(cxXprv)"
+   end if
+   put tVersion & (byte 1 to 41 of pNode) & numToByte(0) & tPriv into tBody
+   put empty into tPriv
+   put cxHash256(tBody) into tCheck
+   if cxIsError(tCheck) then
+      return tCheck && "(cxXprv)"
+   end if
+   return cxB58Encode(tBody & (byte 1 to 4 of tCheck))
+end cxXprv
+
+-- xpub (extended PUBLIC key), Base58Check. version||depth||fp||child||cc||
+-- pubkey33, then Base58Check.
+function cxXpub pNode, pMainnet
+   local tVersion
+   local tPub
+   local tBody
+   local tCheck
+   if pMainnet is false then
+      put binaryEncode("H*", "043587cf") into tVersion
+   else
+      put binaryEncode("H*", "0488b21e") into tVersion
+   end if
+   put cxHdPubkey(pNode) into tPub
+   if cxIsError(tPub) then
+      return tPub && "(cxXpub)"
+   end if
+   put tVersion & (byte 1 to 41 of pNode) & tPub into tBody
+   put cxHash256(tBody) into tCheck
+   if cxIsError(tCheck) then
+      return tCheck && "(cxXpub)"
+   end if
+   return cxB58Encode(tBody & (byte 1 to 4 of tCheck))
+end cxXpub
