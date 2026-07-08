@@ -207,6 +207,8 @@ The generic list applies verbatim. The ones most likely to bite CoinXT:
 - Operators that look like functions: `bitAnd`/`bitOr` are operators; `binaryDecode`/`binaryEncode` are
   functions that fill an out var; `^` may be rejected in a compound expression.
 - `is a <type>` has no `is a string`; commands report via `the result`, functions return a value.
+- `constant` is declared with `=` in livecodescript but with `is` in LCB; the wrong form is a
+  compile error that kills the whole file (confirmed on-engine; the checker now gates it).
 - A whole `.livecodescript` compiles as a unit; a syntax error in one handler breaks the file.
 
 ## Handles and long-lived state

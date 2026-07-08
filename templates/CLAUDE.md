@@ -365,3 +365,11 @@ Seed entries (confirmed on-engine in the family; keep them, add to them):
   CAUSE:   confirmed on-engine: it streams whatever bytes are available, chunk by chunk, as they
            arrive; it does NOT block until the peer closes.
   FIX:     treat it as a streaming read and reassemble/frame by length or delimiter yourself.
+- SYMPTOM: a .livecodescript failed to compile at its FIRST `constant` line (the CoinXT on-engine
+           test-harness pass, 2026-07-08).
+  CAUSE:   `constant kName is <value>` is LCB syntax. livecodescript declares a constant with
+           `constant kName = <value>`. The two languages DIFFER here, and since a whole
+           .livecodescript compiles as one unit, the wrong form kills the entire file.
+  FIX:     `constant kSk1 = "..."` in .livecodescript; `constant kAbiVersion is 2` in .lcb.
+  GATE:    check-livecodescript.py flags the wrong constant form per file type
+           (check_constant_form).
