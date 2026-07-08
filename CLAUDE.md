@@ -519,3 +519,45 @@ byte-exact); transcribed 1:1 to Python to confirm the valid address now yields v
 `751e76e8...` hash160 and a corrupt checksum is still rejected. Logged in the templates/CLAUDE.md living
 gotcha list (item 5.10). Lesson, again: the first time a money code-path is exercised end to end is when
 its latent bug surfaces - the decode side had shipped untested behind an encode-only address flow.
+
+**Phase 5 - wallet restore, WIF, nested SegWit, EIP-191, Bech32 decode; the demo becomes a wallet
+showcase (2026-07-08).** All pure script: no native change, no ABI bump, binaries untouched (still
+ABI 3).
+
+- New public API in `src/coinxt.livecodescript`: `cxWifEncode` / `cxWifDecode` (WIF, version
+  0x80/0xEF, the 0x01 compressed marker, key range re-checked on decode, fail closed),
+  `cxBtcAddressP2SH_P2WPKH` (BIP-49 nested SegWit; REQUIRES the 33-byte compressed key - a 65-byte
+  key would frame a script standard wallets cannot spend, so it fails closed), `cxEthPersonalHash`
+  (EIP-191: 0x19 || "Ethereum Signed Message:" || 0x0A || decimal byte length || message, Keccak-256;
+  sign it with `cxSignRecoverable`, recover the ADDRESS with `cxRecover` + `cxEthAddress`), and
+  `cxBech32Decode` (the exact inverse of `cxBech32Encode`: rejects mixed case, bad characters, bad
+  checksums, the WRONG CONSTANT for the witness version - v0 must be bech32, v1+ bech32m - bad 5->8
+  padding, and bad program lengths, per BIP-173/350). Decode return contracts follow
+  cxBase58CheckDecode's established shape: metadata lines first, binary payload LAST (`line N to -1`).
+  Both new decoders set `the caseSensitive` (the item-5.10 lesson, applied at write time).
+- Same verification discipline as phases 3/4, BEFORE pinning: each algorithm mirrored 1:1 in Python
+  (`run_phase5_encoder_checks` in coin-kat) and run against the famous WIF pair of sk=1, the
+  P2SH-P2WPKH address of pubkey(1), the BIP-173/350 valid AND invalid decode sets plus encode->decode
+  round trips, and EIP-191 digests derived through TWO independent keccaks (the pure-Python reference
+  and the shim) plus a shim-level personal-sign -> ecrecover -> address round trip.
+- **The restore anchor** (`run_restore_checks`): the canonical "abandon...about" mnemonic, driven
+  through the real shim HD nodes, reproduces the OFFICIAL BIP-84 and BIP-86 first addresses (strings
+  printed in the BIPs themselves - they anchor the whole mnemonic -> seed -> path -> key -> address
+  chain), plus the published BIP-44 / BIP-49 / ETH m/44'/60' firsts, the BIP-84 account xpub, and the
+  first key's WIF. The on-engine harness re-runs the same chain (`testRestore`, `testWif`,
+  `testBech32Decode`, `testEthPersonal`, and the P2SH vector in `testAddresses`).
+- **The demo is now ten tabs.** Wallet RESTORES any typed/pasted BIP-39 phrase (the checksum gate
+  first, fail closed on a typo) or generates 12/24 fresh words, then shows the first receiving
+  address of EVERY standard account type (BIP-44/49/84/86 + Ethereum m/44'/60'), the watch-only
+  account xpub, and the first key's WIF; it starts prefilled with the canonical test phrase so every
+  line can be checked against any mainstream wallet. New Schnorr tab (BIP-340 sign / verify / tamper
+  reject, plus the BIP-341 tweak to the bc1p address). The Ethereum tab now runs the EIP-191
+  personal_sign flow end to end (sign a typed message, recover the signer's ADDRESS, v shown raw and
+  as 27/28). New Decode tab: paste any address / WIF / xprv / xpub / 0x string and see it verified
+  and taken apart - or REJECTED on one flipped character (Base58Check version classification, bech32
+  witness-program classification, EIP-55 case check with the single-case "legal but unprotected"
+  distinction, extended-key field breakdown, and loud THIS-IS-A-PRIVATE-KEY warnings on WIF/xprv).
+  Addresses adds the nested-SegWit line and a mainnet/testnet toggle; Keys adds the WIF line.
+- Honest status: headless-verified and vector-locked everywhere Python can reach; the new script
+  paths and demo tabs NEED AN ON-ENGINE PASS (the new harness sections are the checklist; expect the
+  count to grow from 74 to about 100).

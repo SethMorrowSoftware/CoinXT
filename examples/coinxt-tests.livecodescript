@@ -65,6 +65,27 @@ constant kSchnorrSig = "e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce
 -- BIP-86 Taproot: the first receiving key's x-only internal key and bc1p address
 constant kTapInternal = "cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115"
 constant kTapAddr = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
+-- the witness program inside kTapAddr (the published BIP-86 output key)
+constant kTapOutput = "a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c"
+-- WIF of seckey 1: the famous published pair, plus the testnet compressed form
+constant kWif1C = "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
+constant kWif1U = "5HpHagT65TZzG1PH3CSu63k8DbpvD8s5ip4nEB3kEsreAnchuDf"
+constant kWif1TC = "cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN87JcbXMTcA"
+-- P2SH-P2WPKH (BIP-49 nested SegWit) of pubkey(1), mainnet
+constant kAddrP2SH = "3JvL6Ymt8MVWiCNHC7oWU6nLeHNJKLZGLN"
+-- EIP-191 personal-message digest of "hello" (locked in tools/coin-kat.py
+-- from two independent keccak implementations)
+constant kPersonalHello = "50b2c43fd39106bafbba0da34fc430e1f91e3c96ea2acee2bc34119f92b37750"
+-- wallet restore: the canonical mnemonic kMnem128 with an EMPTY passphrase
+-- restores to these (the 84/86 strings are the OFFICIAL BIP test vectors;
+-- all seven are locked through the real shim in tools/coin-kat.py)
+constant kRestA44 = "1LqBGSKuX5yYUonjxT5qGfpUsXKYYWeabA"
+constant kRestA49 = "37VucYSaXLCAsxYyAPfbSi9eh4iEcbShgf"
+constant kRestA84 = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+constant kRestA86 = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
+constant kRestAEth = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+constant kRestXpub84 = "xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAPshWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V"
+constant kRestWif84 = "KyZpNDKnfs94vbrwhJneDi77V6jF64PWPF8x5cdJb8ifgg2DUc9d"
 
 function cxSelfTest
    local tAbi
@@ -112,10 +133,14 @@ function cxSelfTest
    testEcdh
    testEncodings
    testAddresses
+   testWif
+   testBech32Decode
+   testEthPersonal
    testMnemonics
    testHd
    testSchnorr
    testTaproot
+   testRestore
 
    put return & "----" & return after sLog
    put "PASSED:" && sPass & "   FAILED:" && sFail after sLog
@@ -333,6 +358,10 @@ on testAddresses
       "P2PKH(pubkey 1) is the canonical legacy address"
    cxtCheck (cxBtcAddressP2WPKH(cxtBin(kG33), true) is kAddrP2WPKH), \
       "P2WPKH(pubkey 1) is the BIP-173 SegWit example address"
+   cxtCheck (cxBtcAddressP2SH_P2WPKH(cxtBin(kG33), true) is kAddrP2SH), \
+      "P2SH-P2WPKH(pubkey 1) is the locked BIP-49-style address"
+   cxtCheck cxIsError(cxBtcAddressP2SH_P2WPKH(cxtBin(kG65), true)), \
+      "P2SH-P2WPKH rejects an uncompressed pubkey (fail closed)"
    cxtCheck (cxEthAddress(cxtBin(kG65)) is kAddrEth), \
       "ethAddress(pubkey 1) is the pk=1 EIP-55 address"
    -- the compressed pubkey feeds the same Ethereum address (decompressed inside)
@@ -346,6 +375,109 @@ on testAddresses
    cxtCheck cxIsError(cxEthAddressChecksum("0x1234")), \
       "EIP-55 rejects a wrong-length address (fail closed)"
 end testAddresses
+
+on testWif
+   local tDecoded
+   local tKey
+   cxtSection "WIF (wallet import format)"
+   cxtCheck (cxWifEncode(cxtBin(kSk1), true, true) is kWif1C), \
+      "WIF(sk=1, compressed, mainnet) is the published string"
+   cxtCheck (cxWifEncode(cxtBin(kSk1), false, true) is kWif1U), \
+      "WIF(sk=1, uncompressed, mainnet) is the published string"
+   cxtCheck (cxWifEncode(cxtBin(kSk1), true, false) is kWif1TC), \
+      "WIF(sk=1, compressed, testnet) matches the locked vector"
+   put cxWifDecode(kWif1C) into tDecoded
+   cxtCheck (line 1 of tDecoded is "mainnet" and line 2 of tDecoded is "true"), \
+      "WIF decode reports mainnet + compressed"
+   put line 3 to -1 of tDecoded into tKey
+   cxtCheck (tKey is cxtBin(kSk1)), "WIF decode round-trips the key bytes"
+   put empty into tKey
+   put empty into tDecoded
+   -- fail closed: a corrupt checksum, a non-WIF version byte, a bad seckey
+   cxtCheck cxIsError(cxWifDecode("KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWm")), \
+      "a corrupt WIF checksum is rejected"
+   cxtCheck cxIsError(cxWifDecode(kAddrP2PKH)), \
+      "a valid Base58Check with a non-WIF version byte is rejected"
+   cxtCheck cxIsError(cxWifEncode(cxtAscii("short"), true, true)), \
+      "a bad seckey is rejected on encode"
+end testWif
+
+on testBech32Decode
+   local tDec
+   cxtSection "Bech32/Bech32m decode"
+   put cxBech32Decode(kAddrP2WPKH) into tDec
+   cxtCheck (line 1 of tDec is "bc" and line 2 of tDec is "0" and \
+      cxHexEncode(line 3 to -1 of tDec) is "751e76e8199196d454941c45d1b3a323f1433bd6"), \
+      "the BIP-173 example decodes to hrp bc, v0, the hash160 program"
+   put cxBech32Decode(toUpper(kAddrP2WPKH)) into tDec
+   cxtCheck (line 2 of tDec is "0"), "the all-uppercase form is accepted"
+   put cxBech32Decode(kTapAddr) into tDec
+   cxtCheck (line 2 of tDec is "1" and cxHexEncode(line 3 to -1 of tDec) is kTapOutput), \
+      "the BIP-86 bc1p decodes to v1 + the published output key"
+   -- fail closed (each is a BIP-173/350 invalid class)
+   cxtCheck cxIsError(cxBech32Decode("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5")), \
+      "a flipped character is rejected (bad checksum)"
+   cxtCheck cxIsError(cxBech32Decode("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3T4")), \
+      "a mixed-case string is rejected"
+   cxtCheck cxIsError(cxBech32Decode("bc1pw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")), \
+      "a v1 program with a bech32 (not bech32m) checksum is rejected"
+end testBech32Decode
+
+on testEthPersonal
+   local tHash
+   local tSig
+   local tRec
+   cxtSection "EIP-191 personal messages"
+   put cxEthPersonalHash(cxtAscii("hello")) into tHash
+   cxtCheck (cxtHex(tHash) is kPersonalHello), \
+      "personalHash(hello) matches the locked digest"
+   put cxSignRecoverable(cxtBin(kSk1), tHash) into tSig
+   put cxRecover(tSig, tHash) into tRec
+   cxtCheck (cxEthAddress(tRec) is kAddrEth), \
+      "personal_sign -> ecrecover recovers the signer's ADDRESS"
+end testEthPersonal
+
+-- the demo's headline flow, end to end on-engine: the canonical mnemonic
+-- restores to the published first addresses of every standard path (the
+-- BIP-84/86 strings are the official BIP test vectors)
+on testRestore
+   local tSeed
+   local tMaster
+   local tNode
+   local tKey
+   cxtSection "wallet restore (canonical mnemonic -> published addresses)"
+   put cxMnemonicToSeed(kMnem128, empty) into tSeed
+   put cxHdFromSeed(tSeed) into tMaster
+   put empty into tSeed
+   if cxIsError(tMaster) then
+      cxtCheck false, "master node derives from the canonical mnemonic"
+      exit testRestore
+   end if
+   put cxHdDerivePath(tMaster, "m/44'/0'/0'/0/0") into tNode
+   cxtCheck (cxBtcAddressP2PKH(cxHdPubkey(tNode), true) is kRestA44), \
+      "m/44'/0'/0'/0/0 is the published legacy address"
+   put cxHdDerivePath(tMaster, "m/49'/0'/0'/0/0") into tNode
+   cxtCheck (cxBtcAddressP2SH_P2WPKH(cxHdPubkey(tNode), true) is kRestA49), \
+      "m/49'/0'/0'/0/0 is the published nested-SegWit address"
+   put cxHdDerivePath(tMaster, "m/84'/0'/0'/0/0") into tNode
+   cxtCheck (cxBtcAddressP2WPKH(cxHdPubkey(tNode), true) is kRestA84), \
+      "m/84'/0'/0'/0/0 is the OFFICIAL BIP-84 first address"
+   put cxHdSeckey(tNode) into tKey
+   cxtCheck (cxWifEncode(tKey, true, true) is kRestWif84), \
+      "the first BIP-84 key exports to the locked WIF"
+   put empty into tKey
+   put cxHdDerivePath(tMaster, "m/86'/0'/0'/0/0") into tNode
+   cxtCheck (cxBtcAddressP2TR(cxHdPubkey(tNode), true) is kRestA86), \
+      "m/86'/0'/0'/0/0 is the OFFICIAL BIP-86 first address"
+   put cxHdDerivePath(tMaster, "m/44'/60'/0'/0/0") into tNode
+   cxtCheck (cxEthAddress(cxHdPubkey(tNode)) is kRestAEth), \
+      "m/44'/60'/0'/0/0 is the published Ethereum first address"
+   put cxHdDerivePath(tMaster, "m/84'/0'/0'") into tNode
+   cxtCheck (cxXpub(tNode, true) is kRestXpub84), \
+      "the BIP-84 account xpub matches the locked vector"
+   put empty into tNode
+   put empty into tMaster
+end testRestore
 
 on testMnemonics
    local tMnem

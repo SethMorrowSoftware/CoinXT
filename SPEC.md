@@ -211,14 +211,17 @@ Encodings (PURE SCRIPT, pinned by KAT):
   cxHexEncode / cxHexDecode
   cxBase58CheckEncode(pVersion, pPayload) / cxBase58CheckDecode(pString)   (fails closed on bad checksum)
   cxBech32Encode(pHrp, pWitVer, pProgram) / cxBech32Decode(pString)        (Bech32 and Bech32m)
+  cxWifEncode(pSeckey, pCompressed, pMainnet) / cxWifDecode(pWif)          (WIF private-key form)
   cxRlpEncode(pList) / cxRlpDecode(pBytes)                                 [Ethereum tx]
 
 Addresses (compose the above):
   cxBtcAddressP2PKH(pPubkey, pMainnet)    -> Base58Check(0x00 || hash160(pubkey))
+  cxBtcAddressP2SH_P2WPKH(pPubkey, pMainnet) -> Base58Check(0x05 || hash160(0x0014 || hash160(pub33)))
   cxBtcAddressP2WPKH(pPubkey, pMainnet)   -> Bech32("bc", 0, hash160(pubkey))
   cxBtcAddressP2TR(pXonly, pMainnet)      -> Bech32m("bc", 1, xonly)
   cxEthAddress(pPubkey)                   -> "0x" + EIP-55( keccak256(pub65[2..65])[13..32] )
   cxEthAddressChecksum(pAddress)          -> EIP-55 mixed-case form; verify on input
+  cxEthPersonalHash(pMessage)             -> keccak256 of the EIP-191 prefixed message [personal_sign]
 ```
 
 ## 7. Formats CoinXT must get byte-exact (the spec inside the spec)
