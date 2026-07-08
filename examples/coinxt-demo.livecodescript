@@ -16,13 +16,15 @@
 -- EIP-55, mainnet/testnet toggle), Sign & Verify (deterministic RFC 6979
 -- ECDSA + tamper rejection), Schnorr (BIP-340 sign/verify/tamper + the
 -- BIP-341 Taproot tweak), Ethereum (EIP-191 personal_sign + ecrecover to the
--- signer's ADDRESS), Shared Secret (ECDH), Hashes (the Keccak-256 vs
--- SHA3-256 footgun, side by side, plus SHA-2, RIPEMD-160, hash160/hash256),
--- Wallet (type/paste ANY BIP-39 phrase to RESTORE it, or generate 12/24
--- fresh words: seed -> BIP-32 -> the first BIP-44/49/84/86 + Ethereum
--- addresses, the account xpub, and the first key's WIF), Decode (paste any
--- address / WIF / xprv / xpub and see it verified and taken apart, or
--- REJECTED on a bad checksum), About (the pitch + a one-click self-test).
+-- signer's ADDRESS, plus a COMPLETE offline EIP-155 transaction: RLP ->
+-- keccak -> sign -> raw broadcast bytes), Shared Secret (ECDH), Hashes (the
+-- Keccak-256 vs SHA3-256 footgun, plus SHA-2, RIPEMD-160, hash160/hash256,
+-- HMAC), Wallet (type/paste ANY BIP-39 phrase to RESTORE it, or generate
+-- 12/24 fresh words: the first BIP-44/49/84/86 + Ethereum addresses, the
+-- account xpub AND xprv, the first key's WIF, and a TEN-address fidelity
+-- listing per chain to compare against any mainstream wallet), Decode
+-- (paste any address / WIF / xprv / xpub and see it verified and taken
+-- apart, or REJECTED on a bad checksum), About (pitch + one-click self-test).
 --
 -- KEYS IN THIS DEMO ARE PUBLIC TEST KEYS. The demo key derives from the
 -- famously compromised phrase "correct horse battery staple", so it is safe
@@ -442,7 +444,7 @@ on buildKeysTab
    cxdButton "keys:demo", "48,222,236,252", "Use the demo key", "primary"
    cxdButton "keys:sodium", "248,222,468,252", "Draw entropy (SodiumXT)", "idle"
    cxdButton "keys:copy", "480,222,600,252", "Copy pubkey", "idle"
-   cxdCap "keys:outLabel", "48,266,852,286", "seckey (PUBLIC) / compressed pubkey (02|03) / uncompressed pubkey (04) / WIF export:", kClrInkMute
+   cxdCap "keys:outLabel", "48,266,852,286", "seckey (PUBLIC) / compressed + uncompressed pubkey / x-only (BIP-340) / WIF export:", kClrInkMute
    cxdMono "keys:out", "48,288,852,452"
    cxdCap "keys:note", "48,462,852,502", "The compressed pubkey feeds the Bitcoin addresses; the uncompressed one (minus its 04 byte) feeds an Ethereum address. The WIF line is the same secret key in the form every wallet imports. Open the Addresses tab to see all five address forms.", kClrInkMute
    cxdLabel "keys:status", "48,566,852,600", "No key yet - click a button above.", kClrInkSoft, 12, "plain"
@@ -498,14 +500,18 @@ end buildSchnorrTab
 
 -- ---- Ethereum tab
 on buildEthTab
-   cxdHdr "eth:h", "48,138,852,166", "Ethereum: personal_sign, and recovering the signer's ADDRESS"
-   cxdCap "eth:p", "48,168,852,222", "Wallets sign messages the EIP-191 way: the text is prefixed with a 0x19 'Ethereum Signed Message' header and its byte length (so a signed message can never double as a transaction), then Keccak-256 hashed and signed RECOVERABLY. From the signature and digest ALONE, ecrecover yields the signer's public key - and so their 0x address. That is how every 'Sign in with Ethereum' login works.", kClrInkSoft
-   cxdButton "eth:sign", "48,230,248,260", "Sign message (EIP-191)", "eth"
-   cxdButton "eth:recover", "260,230,448,260", "Recover the signer", "idle"
-   cxdCap "eth:msgLabel", "48,274,852,294", "Message (prefixed and hashed exactly as a wallet's personal_sign):", kClrInkMute
-   cxdInput "eth:msg", "48,296,852,328", "I control this address, nonce 7"
-   cxdCap "eth:outLabel", "48,338,852,358", "digest (EIP-191 Keccak-256) / r||s / v / signer + recovered address:", kClrInkMute
-   cxdMono "eth:out", "48,360,852,502"
+   cxdHdr "eth:h", "48,138,852,166", "Ethereum: personal_sign, ecrecover, and a fully signed transaction"
+   cxdCap "eth:p", "48,168,852,216", "Two complete Ethereum flows, entirely offline. personal_sign: the message is prefixed the EIP-191 way (so it can never double as a transaction), Keccak-256 hashed, and signed RECOVERABLY - from the signature alone, ecrecover yields the signer's ADDRESS; that is every 'Sign in with Ethereum' login. Transaction: the fields below are RLP-encoded, hashed, signed, and reassembled into the exact raw bytes a node would broadcast (EIP-155 replay protection, chain 1).", kClrInkSoft
+   cxdCap "eth:msgLabel", "48,224,852,242", "Message (personal_sign):", kClrInkMute
+   cxdInput "eth:msg", "48,244,500,274", "I control this address, nonce 7"
+   cxdButton "eth:sign", "512,244,680,274", "Sign (EIP-191)", "eth"
+   cxdButton "eth:recover", "692,244,852,274", "Recover signer", "idle"
+   cxdCap "eth:txLabel", "48,282,852,300", "Transaction: to-address / value in wei (fixed demo fields: nonce 9, 20 gwei, 21000 gas, chain 1):", kClrInkMute
+   cxdInput "eth:to", "48,302,460,332", "0x3535353535353535353535353535353535353535"
+   cxdInput "eth:value", "472,302,660,332", "1000000000000000000"
+   cxdButton "eth:tx", "672,302,852,332", "Sign transaction", "eth"
+   cxdCap "eth:outLabel", "48,340,852,358", "digest / signature / recovered address / raw signed transaction:", kClrInkMute
+   cxdMono "eth:out", "48,362,852,502"
    cxdLabel "eth:status", "48,566,852,600", "Make a key on the Keys tab first.", kClrInkSoft, 12, "plain"
 end buildEthTab
 
@@ -561,7 +567,7 @@ end buildDecodeTab
 -- ---- About tab (pitch + embedded self-test)
 on buildAboutTab
    cxdHdr "about:h", "48,138,852,166", "CoinXT: Bitcoin and Ethereum primitives for xTalk"
-   cxdCap "about:exp", "48,168,852,300", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256 and RIPEMD-160 - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
+   cxdCap "about:exp", "48,168,852,300", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign a COMPLETE offline EIP-155 Ethereum transaction (RLP is script-side and vector-locked), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
    cxdButton "about:selftest", "48,306,300,338", "Run the full self-test", "primary"
    cxdMono "about:out", "48,350,852,452"
    cxdLabel "about:status", "48,566,852,600", "Click Run the full self-test to check every primitive against a public vector.", kClrInkSoft, 12, "plain"
@@ -716,6 +722,7 @@ command adoptSeckey pEntropy, pStatusText
    put "seckey  " & cxdHex(sSeckey) & return into tOut
    put "pub33   " & cxdHex(sPub33) & return after tOut
    put "pub65   " & cxdHex(sPub65) & return after tOut
+   put "xonly   " & cxdHex(cxXonlyFromSeckey(sSeckey)) && "(BIP-340 form: Schnorr + Taproot)" & return after tOut
    put "wif     " & cxWifEncode(sSeckey, true, true) && "(mainnet, compressed - a SECRET in real life)" after tOut
    put tOut into field "keys:out"
    cxdStatus "keys:status", pStatusText, "ok"
@@ -963,6 +970,8 @@ on handleEth pRole
       doEthSign
    else if pRole is "recover" then
       doRecover
+   else if pRole is "tx" then
+      doTxSign
    end if
 end handleEth
 
@@ -1013,6 +1022,68 @@ on doRecover
       cxdStatus "eth:status", "Recovered address does not match - this must never happen.", "bad"
    end if
 end doRecover
+
+-- build and sign a complete EIP-155 legacy transaction, offline. The demo
+-- fixes nonce 9, 20 gwei, 21000 gas, chain 1 (the shape of the official
+-- EIP-155 example, which the self-test reproduces byte for byte) and takes
+-- the to-address and wei value from the fields. This is the app-layer
+-- composition CoinXT's rules require: the human-readable fields are ON
+-- SCREEN (confirm-before-sign); the library only encodes, hashes, signs.
+on doTxSign
+   local tTo
+   local tChecked
+   local tToBytes
+   local tValueRlp
+   local tItems
+   local tPreimage
+   local tHash
+   local tSig
+   local tV
+   local tRaw
+   local tOut
+   if haveKey("eth:status") is false then
+      exit doTxSign
+   end if
+   put word 1 to -1 of field "eth:to" into tTo
+   put cxEthAddressChecksum(tTo) into tChecked
+   if cxIsError(tChecked) then
+      cxdStatus "eth:status", tChecked, "bad"
+      exit doTxSign
+   end if
+   -- fail closed on a WRONG mixed-case checksum (single-case carries none);
+   -- the case comparison must be exact, so caseSensitive goes on (local)
+   set the caseSensitive to true
+   if tTo is not tChecked and tTo is not toLower(tTo) and tTo is not toUpper(tTo) then
+      cxdStatus "eth:status", "The to-address fails its EIP-55 checksum - not signing.", "bad"
+      exit doTxSign
+   end if
+   put cxHexDecode(char 3 to -1 of toLower(tTo)) into tToBytes
+   put cxRlpUIntDec(word 1 to -1 of field "eth:value") into tValueRlp
+   if cxIsError(tToBytes) or cxIsError(tValueRlp) then
+      cxdStatus "eth:status", "The value must be a plain decimal wei amount.", "bad"
+      exit doTxSign
+   end if
+   -- the six body fields, each RLP-encoded, concatenated in tx order
+   put cxRlpUIntDec("9") & cxRlpUIntDec("20000000000") & cxRlpUIntDec("21000") \
+      & cxRlpBytes(tToBytes) & tValueRlp & cxRlpBytes(empty) into tItems
+   -- EIP-155 preimage: body + (chainId, 0, 0); its keccak is what gets signed
+   put cxRlpList(tItems & cxRlpUIntDec("1") & cxRlpUIntDec("0") & cxRlpUIntDec("0")) into tPreimage
+   put cxKeccak256(tPreimage) into tHash
+   put cxSignRecoverable(sSeckey, tHash) into tSig
+   if cxIsError(tSig) then
+      cxdStatus "eth:status", tSig, "bad"
+      exit doTxSign
+   end if
+   put 35 + 2 + byteToNum(byte 65 of tSig) into tV
+   put cxRlpList(tItems & cxRlpUIntDec(tV) & cxRlpUIntBytes(byte 1 to 32 of tSig) \
+      & cxRlpUIntBytes(byte 33 to 64 of tSig)) into tRaw
+   put "sighash  " & cxdHex(tHash) && "(keccak of the RLP preimage)" & return into tOut
+   put "v        " & tV && "(35 + 2*chainId + recid: EIP-155 replay protection)" & return after tOut
+   put "r||s     " & cxdHex(byte 1 to 64 of tSig) & return after tOut
+   put "raw tx   0x" & cxdHex(tRaw) after tOut
+   put tOut into field "eth:out"
+   cxdStatus "eth:status", "A broadcast-shaped signed transaction, built entirely offline. NEVER broadcast a demo key's transaction.", "ok"
+end doTxSign
 
 -- ------------------------------------------------------------------ ECDH tab actions
 on handleEcdh pRole
@@ -1071,7 +1142,9 @@ on doHashAll
    put "sha512     " & cxdShort(cxSha512(tIn), 96) & return after tOut
    put "ripemd160  " & cxdHex(cxRipemd160(tIn)) & return after tOut
    put "hash160    " & cxdHex(cxHash160(tIn)) && "(a Bitcoin address hashes this)" & return after tOut
-   put "hash256    " & cxdHex(cxHash256(tIn)) && "(txids, Base58Check checksums)" after tOut
+   put "hash256    " & cxdHex(cxHash256(tIn)) && "(txids, Base58Check checksums)" & return after tOut
+   put "hmac256    " & cxdHex(cxHmacSha256(cxdAscii("demo-key"), tIn)) && "(keyed MAC, key = demo-key)" & return after tOut
+   put "hmac512    " & cxdShort(cxHmacSha512(cxdAscii("demo-key"), tIn), 96) && "(BIP-32 derives with this)" after tOut
    put tOut into field "hash:out"
    cxdStatus "hash:status", "Notice how keccak256 and sha3-256 differ completely.", "ok"
 end doHashAll
@@ -1121,6 +1194,8 @@ on doRestore
    local tSeed
    local tMaster
    local tNode
+   local tChain
+   local tI
    local tKey
    local tOut
    put word 1 to -1 of field "seed:mnem" into tMnem
@@ -1181,18 +1256,53 @@ on doRestore
       put "eth     #0 " & cxEthAddress(cxHdPubkey(tNode)) & \
          "  (m/44'/60'/0'/0/0)" & return & return after tOut
    end if
-   -- the watch-only account xpub (BIP-84 account level)
+   -- the account-level serializations (BIP-84 account): the watch-only xpub
+   -- and, because demo phrases are public anyway, the xprv with its warning
    put cxHdDerivePath(tMaster, "m/84'/0'/0'") into tNode
    if not cxIsError(tNode) then
       put "acct xpub  " & cxXpub(tNode, true) & return & \
-         "           (m/84'/0'/0' - watch-only: derives addresses, signs nothing)" after tOut
+         "           (m/84'/0'/0' - watch-only: derives addresses, signs nothing)" & return after tOut
+      put "acct xprv  " & cxXprv(tNode, true) & return & \
+         "           (SECRET in real life: spends everything below the account)" & return after tOut
+   end if
+   -- the fidelity check: ten receiving addresses and the first change
+   -- address, each from ONE cached chain node (a single cxHdDerive step per
+   -- index). Restore the same phrase in any mainstream wallet and the whole
+   -- list must match, address for address.
+   put cxHdDerivePath(tMaster, "m/84'/0'/0'/0") into tChain
+   if not cxIsError(tChain) then
+      put return & "segwit receive #0..#9 (m/84'/0'/0'/0/i) - compare in any wallet:" & return after tOut
+      repeat with tI = 0 to 9
+         put cxHdDerive(tChain, tI, false) into tNode
+         if cxIsError(tNode) then
+            exit repeat
+         end if
+         put "  #" & tI & "  " & cxBtcAddressP2WPKH(cxHdPubkey(tNode), true) & return after tOut
+      end repeat
+   end if
+   put cxHdDerivePath(tMaster, "m/84'/0'/0'/1/0") into tNode
+   if not cxIsError(tNode) then
+      put "  change #0  " & cxBtcAddressP2WPKH(cxHdPubkey(tNode), true) & \
+         "  (m/84'/0'/0'/1/0)" & return after tOut
+   end if
+   put cxHdDerivePath(tMaster, "m/44'/60'/0'/0") into tChain
+   if not cxIsError(tChain) then
+      put return & "eth accounts #0..#9 (m/44'/60'/0'/0/i) - compare in any wallet:" & return after tOut
+      repeat with tI = 0 to 9
+         put cxHdDerive(tChain, tI, false) into tNode
+         if cxIsError(tNode) then
+            exit repeat
+         end if
+         put "  #" & tI & "  " & cxEthAddress(cxHdPubkey(tNode)) & return after tOut
+      end repeat
    end if
    put tOut into field "seed:out"
    -- clear every secret we touched (seed and nodes carry private keys)
    put empty into tSeed
    put empty into tMaster
    put empty into tNode
-   cxdStatus "seed:status", "Wallet restored: one phrase, every standard account (BIP-44/49/84/86 + Ethereum). Demo phrases are PUBLIC - never fund them.", "ok"
+   put empty into tChain
+   cxdStatus "seed:status", "Wallet restored: every standard account, plus ten addresses per chain to verify fidelity against any wallet. Demo phrases are PUBLIC - never fund them.", "ok"
 end doRestore
 
 -- ------------------------------------------------------------------ Decode tab actions
@@ -1445,6 +1555,9 @@ on doSelfTest
    local tMnem
    local tNode
    local tDecoded
+   local tItems
+   local tV
+   local tRaw
    put 0 into sTPass
    put 0 into sTFail
    put "CoinXT self-test" & return & return into sTLog
@@ -1565,6 +1678,22 @@ on doSelfTest
       "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"), \
       "restoring the canonical phrase gives the official BIP-84 first address"
    put empty into tNode
+
+   -- RLP + the official EIP-155 example transaction, byte for byte
+   checkInto (cxHexEncode(cxRlpList(cxRlpBytes(cxdAscii("cat")) & cxRlpBytes(cxdAscii("dog")))) is \
+      "c88363617483646f67"), "RLP of [cat, dog] matches the yellow paper"
+   put cxdBin("4646464646464646464646464646464646464646464646464646464646464646") into tSk
+   put cxRlpUIntDec("9") & cxRlpUIntDec("20000000000") & cxRlpUIntDec("21000") \
+      & cxRlpBytes(cxdBin("3535353535353535353535353535353535353535")) \
+      & cxRlpUIntDec("1000000000000000000") & cxRlpBytes(empty) into tItems
+   put cxKeccak256(cxRlpList(tItems & cxRlpUIntDec("1") & cxRlpUIntDec("0") & cxRlpUIntDec("0"))) into tHash
+   put cxSignRecoverable(tSk, tHash) into tSig
+   put 35 + 2 + byteToNum(byte 65 of tSig) into tV
+   put cxRlpList(tItems & cxRlpUIntDec(tV) & cxRlpUIntBytes(byte 1 to 32 of tSig) \
+      & cxRlpUIntBytes(byte 33 to 64 of tSig)) into tRaw
+   checkInto (cxHexEncode(tRaw) is \
+      "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83"), \
+      "the official EIP-155 example transaction is reproduced byte for byte"
 
    put sTLog into field "about:out"
    if sTFail is 0 then
