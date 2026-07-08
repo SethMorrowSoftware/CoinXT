@@ -104,26 +104,29 @@ on OXT, so a script change additionally needs an on-engine pass; the honest stat
 
 ## Status
 
-**Phases 1-2 native done and externally verified; the script layer awaits its on-engine pass.** The
-shim (`native/coinxt.c`, ABI 2) over the vendored trezor-crypto subset builds under ASan + UBSan and
+**Phases 1-4 native done and externally verified; the script layer awaits its on-engine pass.** The
+shim (`native/coinxt.c`, ABI 3) over the vendored trezor-crypto subset builds under ASan + UBSan and
 exposes the full hash/KDF surface (SHA-256/512, SHA3-256, Keccak-256, RIPEMD-160, HMAC,
-PBKDF2-HMAC-SHA512) and the secp256k1 curve surface (keypair, deterministic RFC 6979 ECDSA - always
-low-s, recoverable signatures + `ecrecover`, ECDH). `tools/coin-kat.py` pins it all headless: the
-classic public RFC 6979 vectors, the seckey range edges, the ecrecover round trip, and - the bar that
-matters for a money library - CoinXT signatures VERIFY in the independent python-ecdsa library and
-match its outputs byte for byte, in both directions. The `.lcb` foreign module and the public `cx*`
-script API are written and pass the static gates; there is no headless OXT compiler, so their honest
-status is "designed and statically reasoned; needs an on-engine pass", and the on-engine self-test
-harness (`examples/coinxt-tests.livecodescript`) plus the self-building demo stack
-(`examples/coinxt-demo.livecodescript`) are ready for that pass; the full stack ran 41/41 on a real
-engine (see [CLAUDE.md](CLAUDE.md)). The build and packaging follow the family model: a CMake build, a
-5-platform CI matrix, and per-platform binaries committed under `src/code/` on main. **Phase 3
-(addresses) and BIP-39 mnemonics are now in**, pure script: hex, Base58Check, Bech32, EIP-55, the BTC
-(P2PKH, P2WPKH) + ETH address builders, and `cxMnemonicFromEntropy` / `cxMnemonicValidate` /
-`cxMnemonicToSeed` over the embedded 2048-word list - all transcription-verified against Python and
-vector-locked in CI to the public BIP-173 / EIP-55 / Trezor BIP-39 vectors (needs an on-engine pass).
-Next: BIP-32 HD derivation, the one piece that needs native work (vendored `bip32.c` + an ABI bump).
-Schnorr / BIP-340 is deferred to a Taproot phase (upstream provides it only through secp256k1-zkp).
+PBKDF2-HMAC-SHA512), the secp256k1 curve surface (keypair, deterministic RFC 6979 ECDSA - always
+low-s, recoverable signatures + `ecrecover`, ECDH), BIP-32 HD child-key derivation, BIP-340 Schnorr,
+and the BIP-341 Taproot key-path tweak. `tools/coin-kat.py` pins it all headless: the classic public
+RFC 6979 vectors, the seckey range edges, the ecrecover round trip, the official BIP-32 xprv/xpub
+vectors, the official BIP-340 test vectors (sign + verify, including the invalid cases), and the
+BIP-86 Taproot addresses - and, the bar that matters for a money library, CoinXT signatures VERIFY in
+independent implementations (ECDSA in python-ecdsa; Schnorr against a BIP-340 reference carried in the
+harness) and match byte for byte. The BIP-32 CKD and BIP-340/341 schemes are transcribed over the
+audited primitives already vendored (no new vendored files, no `bip32.c` multi-curve tree, no
+secp256k1-zkp). The `.lcb` foreign module and the public `cx*` script API are written and pass the
+static gates; there is no headless OXT compiler, so their honest status is "designed and statically
+reasoned; needs an on-engine pass", and the on-engine self-test harness
+(`examples/coinxt-tests.livecodescript`) plus the self-building demo stack
+(`examples/coinxt-demo.livecodescript`) are ready for that pass; the phases 1-3 stack ran 41/41 on a
+real engine (see [CLAUDE.md](CLAUDE.md)); the ABI-3 additions need their own pass. The build and
+packaging follow the family model: a CMake build, a 5-platform CI matrix, and per-platform binaries
+committed under `src/code/` on main. Addresses and BIP-39 mnemonics are pure script: hex,
+Base58Check, Bech32/Bech32m, EIP-55, the BTC (P2PKH, P2WPKH, P2TR) + ETH address builders, xprv/xpub
+framing, and the BIP-39 mnemonic surface over the embedded 2048-word list - all transcription-verified
+against Python and vector-locked in CI (BIP-173/350, BIP-86, EIP-55, Trezor BIP-39, BIP-32).
 
 [SPEC.md](SPEC.md), [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md), and [CLAUDE.md](CLAUDE.md) are the
 design and the running as-built log. Every deterministic path is pinned to a public known-answer vector,

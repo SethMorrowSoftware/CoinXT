@@ -141,9 +141,10 @@ Curve (secp256k1):
   cnx_ecdsa_sign_recoverable(sk32, hash32, out_sig65) -> int        // Ethereum: 64 + recid
   cnx_ecdsa_recover(sig65, hash32, out_pub65) -> int                // ecrecover
   cnx_ecdh(sk32, pub, out32) -> int
-  cnx_schnorr_sign(sk32, msg32, aux32, out_sig64) -> int            // BIP-340
+  cnx_schnorr_sign(sk32, msg32, aux32, out_sig64) -> int            // BIP-340 (aux optional)
   cnx_schnorr_verify(xonly_pub32, msg32, sig64) -> int
-  cnx_xonly_from_seckey(sk32, out32, out_parity) -> int             // BIP-340 / Taproot
+  cnx_xonly_from_seckey(sk32, out32) -> int                         // BIP-340 x-only pubkey
+  cnx_taproot_tweak_pubkey(xonly_internal32, out32) -> int          // BIP-341 key-path output key
 
 Hashes:
   cnx_sha256(in, len, out32) / cnx_sha512(in, len, out64)
@@ -161,9 +162,9 @@ HD (BIP-32) - the node is a fixed-size opaque byte blob (version||depth||fingerp
   cnx_hdnode_public_key(node, out33) -> int
   cnx_hdnode_chaincode(node, out32) -> int
 
-Mnemonic (BIP-39):
-  cnx_bip39_seed(mnemonic, mlen, passphrase, plen, out64) -> int    // PBKDF2-HMAC-SHA512, 2048 iters
-  // entropy<->words and the checksum word live in script (pure bytes + a SHA-256 call)
+Mnemonic (BIP-39): entirely in script, no dedicated native call. entropy<->words
+  and the checksum word are pure bytes + a cnx_sha256 call; mnemonic -> seed is
+  cnx_pbkdf2_hmac_sha512 (2048 iters, salt "mnemonic"+passphrase, 64 bytes).
 
 Hygiene:
   cnx_wipe(buf, len) -> int      // memzero an engine-allocated out-buffer that carried a

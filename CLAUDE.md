@@ -334,8 +334,8 @@ MIT file in `native/vendor/` covers only the vendored code) and protecting `main
   libcoinxt binary per platform; (b) whether `MCDataGetBytePtr` of an empty Data surfaces as `nothing`
   (the `cnxDataPtr` sentinel path); (c) that returning a non-nothing `optional Pointer` as `Pointer`
   compiles (same helper).
-- Schnorr / BIP-340 is DEFERRED to a Taproot phase: this upstream commit provides it only through the
-  bundled secp256k1-zkp (a much larger vendoring surface). The phase-0 open question is hereby decided.
+- Schnorr / BIP-340 was DEFERRED here, then DELIVERED in phase 4b by transcription rather than by
+  vendoring secp256k1-zkp (see the phase-4b as-built note below); this line records the original call.
 - Local build outputs (`native/libcoinxt.*`) are gitignored; committed per-platform binaries arrive
   deliberately in the packaging phase, pinned in `MANIFEST.sha256`.
 
@@ -457,3 +457,50 @@ Next (the last wallet piece): BIP-32 HD derivation. This is the one that NEEDS n
 key tweak is secp256k1 scalar/point math - so it means vendoring `bip32.c` (which pulls the
 ed25519-donna subtree), new `cnx_hdnode_*` exports, an ABI bump to 3, `cxCheckABI` to 3, and rebuilt
 per-platform binaries.
+
+**Phase 4b - BIP-32 HD, BIP-340 Schnorr, BIP-341 Taproot; ABI 3, TRANSCRIBED not vendored
+(2026-07-08).** The three remaining curve features landed together in ONE ABI bump (to 3), so the
+family never eats a second bump for a piece we could have batched. The key decision, twice: compose the
+audited primitives already vendored, do NOT drag in a huge new tree.
+
+- **BIP-32 CKD.** trezor's `bip32.c` is multi-curve and pulls aes/cardano/nem/nist256p1/ed25519-donna
+  (mostly unconditional includes). CoinXT needs only secp256k1, so `native/coinxt.c` transcribes
+  trezor's OWN `hdnode_private_ckd_bip32` sequence over hmac_sha512 + bn_add/bn_mod +
+  ecdsa_get_public_key33. The node crosses the ABI as a 73-byte opaque blob
+  (`depth|parent_fp|child|chaincode|priv`); xprv/xpub are FRAMED IN SCRIPT (version bytes +
+  Base58Check), so no extra native call. `coin-kat.py` reconstructs each node's full xprv AND xpub the
+  exact way `cxXprv`/`cxXpub` do (from the blob fields + the shim's pubkey) and asserts equality to the
+  OFFICIAL BIP-32 vector-1 strings - which caught a mistyped master xpub (a dropped trailing `8`), the
+  same self-defending reconstruction the address vectors use.
+- **BIP-340 Schnorr.** Transcribed the BIP-340 reference pseudocode step for step over `scalar_multiply`
+  (k*G), `point_multiply` (k*P), `point_add`, `uncompress_coords` (= lift_x), the `bn_*` modular
+  arithmetic, and `sha256` (the tagged hash is `SHA256(SHA256(tag)||SHA256(tag)||m)`). The bn_*
+  discipline (read_be, mod, multiply, add, subtract-for-negate, is_odd for even-y) MIRRORS trezor's own
+  `tc_ecdsa_sign_digest` / `_verify_digest` - I read both before writing. Signing is deterministic:
+  `aux_rand` is a CALLER-supplied optional 32-byte buffer (NULL -> 32 zero bytes, BIP-340's default),
+  no shim RNG feeds the output. CoinXT signs a FIXED 32-byte message (like its ECDSA; Taproot always
+  signs a 32-byte sighash), so the variable-length BIP-340 vectors (15-18) are out of scope by design.
+  **VERIFY promoted to fact, headless:** the shim's signatures are byte-exact against BOTH the official
+  BIP-340 vectors (rows 0-14) AND an independent BIP-340 reference implementation carried in
+  `coin-kat.py`; verify accepts every valid case and fails closed on every invalid one (off-curve
+  pubkey, `has_even_y(R)` false, `sG-eP` infinite, `r >= p`, `s >= n`, pubkey x past the field size).
+- **BIP-341 Taproot.** `cnx_taproot_tweak_pubkey` computes the key-path output key
+  `Q = P + int(hash_TapTweak(P))*G` (lift_x the internal key, add the tweak point), pinned to the
+  official BIP-86 vectors (internal key -> output key -> `bc1p` address). `cxBtcAddressP2TR` does the
+  tweak then Bech32m-frames the witness-v1 program. **A latent money bug surfaced here:**
+  `cxBech32Encode`'s witness-v1+ bech32m constant was `719259665`, not `0x2bc830a3` (734539939) - the
+  v1 path had NEVER been exercised (only P2WPKH/v0 shipped). Fixed, and locked: the livecodescript
+  encoder was transcribed 1:1 to Python and shown to reproduce all three BIP-86 `bc1p` addresses (and
+  still the BIP-173 `bc1q`). Lesson: an untested code path in a money encoder is a bug waiting for its
+  first caller; add the KAT the moment the path becomes reachable.
+- **The batch.** BIP-32 + Schnorr + Taproot in one ABI bump added ZERO new vendored files. Everything
+  else (xprv/xpub, WIF, RLP, tx-building) stays script and needs no further native bump; the rich
+  73-byte node blob keeps serialization script-side. The `.lcb` binds all seven new exports (aux_rand
+  as an `optional Pointer`), and the `cx*` layer adds `cxHdFromSeed`/`cxHdDerive`/`cxHdDerivePath`
+  (clears each intermediate parent node) / `cxHdSeckey`/`Pubkey`/`ChainCode` / `cxXprv`/`cxXpub`,
+  `cxXonlyFromSeckey`/`cxSchnorrSign`/`cxSchnorrVerify`, and `cxTaprootOutputKey`/`cxBtcAddressP2TR`.
+  The demo's Seed tab became a full **Wallet** tab (phrase -> seed -> BIP-84 account xpub -> first
+  SegWit and Taproot receiving addresses), and Addresses grew a fourth (Taproot) line. Native done +
+  externally verified under ASan/UBSan and coin-kat; the `.lcb` + `cx*` + demo layer is
+  transcription- and vector-locked but **NEEDS AN ON-ENGINE PASS** (add testHd/testSchnorr/testTaproot
+  to the 41/41 harness run, and confirm the `optional Pointer` NULL-aux path compiles/binds on-engine).
