@@ -50,6 +50,21 @@ constant kAddrEth = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
 constant kEnt128 = "00000000000000000000000000000000"
 constant kMnem128 = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 constant kSeed128 = "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
+-- BIP-32 test vector 1: seed, master xprv/xpub, and the m/0' xprv/xpub
+constant kBip32Seed = "000102030405060708090a0b0c0d0e0f"
+constant kXprvM = "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi"
+constant kXpubM = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8"
+constant kXprvM0H = "xprv9uHRZZhk6KAJC1avXpDAp4MDc3sQKNxDiPvvkX8Br5ngLNv1TxvUxt4cV1rGL5hj6KCesnDYUhd7oWgT11eZG7XnxHrnYeSvkzY7d2bhkJ7"
+constant kXpubM0H = "xpub68Gmy5EdvgibQVfPdqkBBCHxA5htiqg55crXYuXoQRKfDBFA1WEjWgP6LHhwBZeNK1VTsfTFUHCdrfp1bgwQ9xv5ski8PX9rL2dZXvgGDnw"
+-- BIP-340 test vector 0: seckey, x-only pubkey, message, aux_rand, signature
+constant kSchnorrSk = "0000000000000000000000000000000000000000000000000000000000000003"
+constant kSchnorrPk = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+constant kSchnorrMsg = "0000000000000000000000000000000000000000000000000000000000000000"
+constant kSchnorrAux = "0000000000000000000000000000000000000000000000000000000000000000"
+constant kSchnorrSig = "e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce2dca821525f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0"
+-- BIP-86 Taproot: the first receiving key's x-only internal key and bc1p address
+constant kTapInternal = "cc8a4bc64d897bddc5fbc2f670f7a8ba0b386779106cf1223c6fc5d7cd6fc115"
+constant kTapAddr = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
 
 function cxSelfTest
    local tAbi
@@ -98,6 +113,9 @@ function cxSelfTest
    testEncodings
    testAddresses
    testMnemonics
+   testHd
+   testSchnorr
+   testTaproot
 
    put return & "----" & return after sLog
    put "PASSED:" && sPass & "   FAILED:" && sFail after sLog
@@ -349,3 +367,54 @@ on testMnemonics
    cxtCheck cxIsError(cxMnemonicFromEntropy(cxtBin("00112233"))), \
       "entropy that is not 16-32 bytes is rejected"
 end testMnemonics
+
+on testHd
+   local tNode
+   local tChild
+   local tPathNode
+   cxtSection "BIP-32 HD wallets (xprv / xpub, path derivation)"
+   put cxHdFromSeed(cxtBin(kBip32Seed)) into tNode
+   cxtCheck (cxXprv(tNode, true) is kXprvM), "master xprv matches BIP-32 vector 1"
+   cxtCheck (cxXpub(tNode, true) is kXpubM), "master xpub matches BIP-32 vector 1"
+   -- one hardened step: m/0'
+   put cxHdDerive(tNode, 0, true) into tChild
+   cxtCheck (cxXprv(tChild, true) is kXprvM0H), "m/0' xprv matches BIP-32 vector 1"
+   cxtCheck (cxXpub(tChild, true) is kXpubM0H), "m/0' xpub matches BIP-32 vector 1"
+   -- the path parser reaches the same node (the apostrophe marks hardened)
+   put cxHdDerivePath(tNode, "m/0'") into tPathNode
+   cxtCheck (cxXprv(tPathNode, true) is kXprvM0H), "cxHdDerivePath('m/0'') reaches the same node"
+   -- a malformed path element fails closed
+   cxtCheck cxIsError(cxHdDerivePath(tNode, "m/notanumber")), "a non-numeric path element is rejected"
+   -- nodes carry a private key: clear them
+   put empty into tNode
+   put empty into tChild
+   put empty into tPathNode
+end testHd
+
+on testSchnorr
+   local tXonly
+   local tSig
+   cxtSection "Schnorr / BIP-340"
+   put cxXonlyFromSeckey(cxtBin(kSchnorrSk)) into tXonly
+   cxtCheck (cxtHex(tXonly) is kSchnorrPk), "x-only pubkey matches BIP-340 vector 0"
+   -- deterministic sign with the vector's aux_rand
+   put cxSchnorrSign(cxtBin(kSchnorrSk), cxtBin(kSchnorrMsg), cxtBin(kSchnorrAux)) into tSig
+   cxtCheck (cxtHex(tSig) is kSchnorrSig), "signature matches BIP-340 vector 0"
+   -- verify accepts the good signature, rejects a wrong message
+   cxtCheck (cxSchnorrVerify(tXonly, cxtBin(kSchnorrMsg), tSig) is true), "verify accepts the valid signature"
+   cxtCheck (cxSchnorrVerify(tXonly, cxtBin(kSchnorrSk), tSig) is false), "verify rejects a wrong message (fail closed)"
+   -- empty aux (a NULL pointer) behaves as the all-zero aux the vector uses
+   put cxSchnorrSign(cxtBin(kSchnorrSk), cxtBin(kSchnorrMsg), "") into tSig
+   cxtCheck (cxtHex(tSig) is kSchnorrSig), "empty aux behaves as the zero-aux default"
+end testSchnorr
+
+on testTaproot
+   cxtSection "Taproot (BIP-341 tweak, BIP-86 address)"
+   cxtCheck (cxBtcAddressP2TR(cxtBin(kTapInternal), true) is kTapAddr), \
+      "P2TR(internal key) is the BIP-86 bc1p address"
+   -- a full SEC1 pubkey also yields a well-formed witness-v1 address
+   cxtCheck (char 1 to 4 of cxBtcAddressP2TR(cxtBin(kG33), true) is "bc1p"), \
+      "P2TR accepts a compressed pubkey and yields a bc1p address"
+   cxtCheck cxIsError(cxBtcAddressP2TR(cxtBin("00112233"), true)), \
+      "P2TR rejects a wrong-length key (fail closed)"
+end testTaproot
