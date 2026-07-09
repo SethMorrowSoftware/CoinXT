@@ -1912,6 +1912,238 @@ def run_bip322_checks(lib, kat):
 
 
 # ---------------------------------------------------------------------------
+# The OPTIONAL online layer's response PARSERS (src/coinxt-online.livecodescript,
+# cxoParse*). These are pure text functions, so they are vector-locked here
+# and re-run on-engine (testOnline) against the SAME representative
+# Esplora-shape fixtures. Documented honestly as SCHEMA fixtures (the
+# published Esplora response shape), not a captured live response; the thin
+# HTTP verbs cxoGet/cxoPost need the on-engine pass. The security story
+# (SPEC 1.1): an explorer answer is untrusted, so every parser fails closed
+# and the human confirms amounts before the offline core signs.
+ESPLORA_UTXO = (
+    '[{"txid":"12b5633bad1f9c167d523ad1aa1947b2732a865bf5414eab2f9e5ae1d8c72'
+    'e26","vout":0,"status":{"confirmed":true,"block_height":698329,"block_h'
+    'ash":"0000000000000000000abegf","block_time":1627906033},"value":420000'
+    '},{"txid":"a1b2c3d4e5f6071829384a5b6c7d8e9f00112233445566778899aabbccdd'
+    'eeff","vout":2,"status":{"confirmed":false},"value":15000}]')
+ESPLORA_ADDR = (
+    '{"address":"tb1qexample","chain_stats":{"funded_txo_count":6,"funded_txo'
+    '_sum":1500000,"spent_txo_count":3,"spent_txo_sum":600000},"mempool_stats'
+    '":{"funded_txo_count":0,"funded_txo_sum":999,"spent_txo_count":0,"spent_'
+    'txo_sum":0}}')
+ESPLORA_FEES = ('{"1":87.882,"2":87.882,"3":80.15,"6":68.285,"10":50.1,"144":'
+                '1.2,"1008":1.0}')
+
+
+def _o_value_token(body, j):
+    n = len(body)
+    ch = body[j]
+    if ch == '"':
+        k = j + 1
+        while k < n:
+            if body[k] == "\\":
+                k += 2
+                continue
+            if body[k] == '"':
+                return body[j + 1:k]
+            k += 1
+        return None
+    if ch in "{[":
+        close = "}" if ch == "{" else "]"
+        depth, k, instr, esc = 0, j, False, False
+        while k < n:
+            c = body[k]
+            if instr:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    instr = False
+            elif c == '"':
+                instr = True
+            elif c == ch:
+                depth += 1
+            elif c == close:
+                depth -= 1
+                if depth == 0:
+                    return body[j:k + 1]
+            k += 1
+        return None
+    k = j
+    while k < n and body[k] != ",":
+        k += 1
+    return body[j:k].strip()
+
+
+def _o_field(obj, key):
+    s = obj.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return None
+    body = s[1:-1]
+    needle = '"' + key + '"'
+    depth, i, n = 0, 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch == '"':
+            if depth == 0 and body[i:i + len(needle)] == needle:
+                j = i + len(needle)
+                while j < n and body[j] in " \t":
+                    j += 1
+                if j < n and body[j] == ":":
+                    j += 1
+                    while j < n and body[j] in " \t":
+                        j += 1
+                    return _o_value_token(body, j)
+            i += 1
+            while i < n:
+                if body[i] == "\\":
+                    i += 2
+                    continue
+                if body[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        i += 1
+    return None
+
+
+def _o_array_elements(arr):
+    s = arr.strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        return None
+    body = s[1:-1]
+    out, depth, start, instr, esc = [], 0, 0, False, False
+    for i, ch in enumerate(body):
+        if instr:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                instr = False
+            continue
+        if ch == '"':
+            instr = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif ch == "," and depth == 0:
+            out.append(body[start:i].strip())
+            start = i + 1
+    if depth != 0 or instr:
+        return None
+    tail = body[start:].strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def _o_uint(tok):
+    return tok if (tok is not None and tok.isdigit()) else None
+
+
+def _o_parse_utxos(body):
+    elems = _o_array_elements(body)
+    if elems is None:
+        return "CoinXT: error"
+    lines = []
+    for e in elems:
+        txid = _o_field(e, "txid")
+        vout = _o_uint(_o_field(e, "vout"))
+        value = _o_uint(_o_field(e, "value"))
+        status = _o_field(e, "status")
+        confirmed = "true" if (status is not None
+                               and _o_field(status, "confirmed") == "true") else "false"
+        if txid is None or len(txid) != 64 or vout is None or value is None:
+            return "CoinXT: error"
+        lines.append(f"{txid} {vout} {value} {confirmed}")
+    return "\n".join(lines)
+
+
+def _o_parse_balance(body):
+    cs = _o_field(body, "chain_stats")
+    if cs is None:
+        return "CoinXT: error"
+    f = _o_uint(_o_field(cs, "funded_txo_sum"))
+    sp = _o_uint(_o_field(cs, "spent_txo_sum"))
+    if f is None or sp is None:
+        return "CoinXT: error"
+    return int(f) - int(sp)
+
+
+def _o_parse_feerate(body, target="6"):
+    import re as _re
+    tok = _o_field(body, target)
+    if tok is None or not _re.match(r"^[0-9]+(\.[0-9]+)?$", tok):
+        return "CoinXT: error"
+    v = float(tok)
+    n = int(v)
+    return n + 1 if v > n else n
+
+
+def run_online_parse_checks(lib, kat):
+    u = _o_parse_utxos(ESPLORA_UTXO)
+    kat.check("cxoParseUtxos yields two labelled lines",
+              u == ("12b5633bad1f9c167d523ad1aa1947b2732a865bf5414eab2f9e5ae1d"
+                    "8c72e26 0 420000 true\n"
+                    "a1b2c3d4e5f6071829384a5b6c7d8e9f00112233445566778899aabbc"
+                    "cddeeff 2 15000 false"), u)
+    kat.check("empty utxo array -> empty", _o_parse_utxos("[]") == "")
+    kat.check("truncated utxo body fails closed",
+              _o_parse_utxos('[{"txid":"x","vout":0').startswith("CoinXT:"))
+    kat.check("utxo missing value fails closed",
+              _o_parse_utxos('[{"txid":"' + "a" * 64
+                             + '","vout":0,"status":{"confirmed":true}}]'
+                             ).startswith("CoinXT:"))
+    kat.check("short txid fails closed",
+              _o_parse_utxos('[{"txid":"ab","vout":0,"value":1,"status":{"conf'
+                             'irmed":true}}]').startswith("CoinXT:"))
+    kat.check("cxoParseBalance = funded - spent (depth-isolated)",
+              _o_parse_balance(ESPLORA_ADDR) == 900000)
+    kat.check("balance missing chain_stats fails closed",
+              str(_o_parse_balance('{"address":"x"}')).startswith("CoinXT:"))
+    kat.check("cxoParseFeeRate rounds the 6-block target up to 69",
+              _o_parse_feerate(ESPLORA_FEES) == 69)
+    kat.check("fee 1008-block target = 1",
+              _o_parse_feerate(ESPLORA_FEES, "1008") == 1)
+    kat.check("fee missing target fails closed",
+              str(_o_parse_feerate('{"1":5.0}', "6")).startswith("CoinXT:"))
+    # the fuzz that also runs against the livecodescript's logic: no crash,
+    # ever, on arbitrary JSON (a hostile explorer cannot make the parser throw)
+    import random
+    random.seed(7)
+
+    def rj(d=0):
+        if d > 3 or random.random() < 0.3:
+            return random.choice(['123', '"x"', 'true', 'false', 'null', '""'])
+        if random.random() < 0.5:
+            return "[" + ",".join(rj(d + 1)
+                                  for _ in range(random.randint(0, 3))) + "]"
+        return "{" + ",".join(f'"{random.randint(0,9)}":{rj(d+1)}'
+                              for _ in range(random.randint(0, 3))) + "}"
+    crashed = False
+    for _ in range(3000):
+        try:
+            blob = rj()
+            _o_parse_utxos(blob)
+            _o_parse_balance(blob)
+            _o_parse_feerate(blob)
+        except Exception:
+            crashed = True
+            break
+    kat.check("3000 random JSON blobs never crash the parsers", not crashed)
+
+
+# ---------------------------------------------------------------------------
 # The wallet-restore path (the demo's headline feature): the canonical BIP-39
 # test mnemonic restores, through the SHIM's real HD-node derivation, to the
 # OFFICIAL BIP-84 and BIP-86 first addresses (those two strings are printed
@@ -2031,6 +2263,7 @@ def main(argv):
         run_psbt_checks(lib, kat)
         run_eip712_checks(lib, kat)
         run_bip322_checks(lib, kat)
+        run_online_parse_checks(lib, kat)
         run_restore_checks(lib, kat)
 
     if kat.problems:

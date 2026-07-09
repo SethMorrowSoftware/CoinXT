@@ -380,19 +380,20 @@ on buildUI
 
    -- tab bar: twelve equal tabs on one 96px rhythm, full labels, flush
    -- with the panel edges
-   cxdButton "ui:tabKeys", "24,74,109,104", "Keys", "idle"
-   cxdButton "ui:tabAddr", "112,74,197,104", "Addresses", "idle"
-   cxdButton "ui:tabSign", "200,74,285,104", "Sign", "idle"
-   cxdButton "ui:tabSchn", "288,74,373,104", "Schnorr", "idle"
-   cxdButton "ui:tabEth", "376,74,461,104", "Ethereum", "idle"
-   cxdButton "ui:tabBtx", "464,74,549,104", "BTC Tx", "idle"
-   cxdButton "ui:tabPsbt", "552,74,637,104", "PSBT", "idle"
-   cxdButton "ui:tabEcdh", "640,74,725,104", "ECDH", "idle"
-   cxdButton "ui:tabHash", "728,74,813,104", "Hashes", "idle"
-   cxdButton "ui:tabSeed", "816,74,901,104", "Wallet", "idle"
-   cxdButton "ui:tabTool", "904,74,989,104", "Tools", "idle"
-   cxdButton "ui:tabDec", "992,74,1077,104", "Decode", "idle"
-   cxdButton "ui:tabAbout", "1080,74,1173,104", "About", "idle"
+   cxdButton "ui:tabKeys", "24,74,101,104", "Keys", "idle"
+   cxdButton "ui:tabAddr", "106,74,183,104", "Addresses", "idle"
+   cxdButton "ui:tabSign", "188,74,265,104", "Sign", "idle"
+   cxdButton "ui:tabSchn", "270,74,347,104", "Schnorr", "idle"
+   cxdButton "ui:tabEth", "352,74,429,104", "Ethereum", "idle"
+   cxdButton "ui:tabBtx", "434,74,511,104", "BTC Tx", "idle"
+   cxdButton "ui:tabPsbt", "516,74,593,104", "PSBT", "idle"
+   cxdButton "ui:tabEcdh", "598,74,675,104", "ECDH", "idle"
+   cxdButton "ui:tabHash", "680,74,757,104", "Hashes", "idle"
+   cxdButton "ui:tabSeed", "762,74,839,104", "Wallet", "idle"
+   cxdButton "ui:tabTool", "844,74,921,104", "Tools", "idle"
+   cxdButton "ui:tabOnline", "926,74,1003,104", "Online", "idle"
+   cxdButton "ui:tabDec", "1008,74,1085,104", "Decode", "idle"
+   cxdButton "ui:tabAbout", "1090,74,1173,104", "About", "idle"
 
    -- content panel + footer
    cxdPanel "ui:panel", "24,114,1176,632"
@@ -409,6 +410,7 @@ on buildUI
    buildHashTab
    buildSeedTab
    buildToolTab
+   buildOnlineTab
    buildDecodeTab
    buildAboutTab
 end buildUI
@@ -633,6 +635,22 @@ on buildToolTab
    cxdLabel "tool:status", "48,596,1152,628", "Build a profile from the Wallet tab's phrase, or paste an address and Scan.", kClrInkSoft, 12, "plain"
 end buildToolTab
 
+-- ---- Online tab (the OPTIONAL network layer; opt-in, testnet-first)
+on buildOnlineTab
+   cxdHdr "online:h", "48,128,1152,156", "Online: look up balances and broadcast - the OPT-IN network layer"
+   cxdCap "online:p", "48,158,1152,214", "This is the SEPARATE coinxt-online module (SPEC 1.1), not the offline core. It reads chain state and broadcasts already-signed bytes over the engine's HTTP; it NEVER touches a key. Two honest costs: querying an explorer LEAKS your address to that server (point Endpoint at your own node or a Tor hidden service to avoid it), and Broadcast puts a real transaction on a real network. Defaults to a public TESTNET explorer, so a first run cannot spend mainnet coins.", kClrInkSoft
+   cxdButton "online:balance", "48,220,236,250", "Look up balance", "primary"
+   cxdButton "online:utxos", "248,220,436,250", "List UTXOs", "idle"
+   cxdButton "online:net", "448,220,648,250", "Network: testnet", "idle"
+   cxdCap "online:addrLabel", "48,258,1152,276", "Address to query (a TESTNET address by default; paste your own):", kClrInkMute
+   cxdInput "online:addr", "48,278,1152,308", "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+   cxdCap "online:txLabel", "48,316,1152,334", "Raw signed transaction hex to broadcast (from the BTC Tx or PSBT tab):", kClrInkMute
+   cxdInput "online:tx", "48,336,972,366", ""
+   cxdButton "online:broadcast", "984,336,1152,366", "Broadcast", "eth"
+   cxdMono "online:out", "48,376,1152,586"
+   cxdLabel "online:status", "48,596,1152,628", "Reads go to a public testnet explorer by default. Nothing is broadcast until you click Broadcast on a real signed tx.", kClrInkSoft, 12, "plain"
+end buildOnlineTab
+
 -- ---- Decode / inspect tab
 on buildDecodeTab
    cxdHdr "dec:h", "48,128,1152,156", "Paste anything: verify its checksum and take it apart"
@@ -648,7 +666,7 @@ end buildDecodeTab
 -- ---- About tab (pitch + embedded self-test)
 on buildAboutTab
    cxdHdr "about:h", "48,128,1152,156", "CoinXT: Bitcoin and Ethereum primitives for xTalk"
-   cxdCap "about:exp", "48,158,1152,290", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), act as a PSBT cold signer (decode, sign, finalize BIP-174 files from Sparrow / Electrum / Core, including HD signing via the PSBT's own derivation paths), sign EIP-712 typed data (the chain behind every signTypedData prompt, pinned to the EIP's own example), prove address ownership with BIP-322 signed messages (the BIP's own Core-made signatures verify here), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
+   cxdCap "about:exp", "48,158,1152,290", "CoinXT wraps trezor-crypto (the MIT-licensed C crypto core of the Trezor hardware wallet) behind a small C shim and a livecodescript API, so any xTalk app can make secp256k1 keys, sign deterministically (ECDSA RFC 6979 low-s, and BIP-340 Schnorr), verify, recover a signer the Ethereum way (raw and EIP-191 personal_sign), sign COMPLETE offline transactions on BOTH chains (EIP-155 legacy Ethereum, and BIP-143 SegWit Bitcoin with strict-DER framing - each reproducing its official published example byte for byte), act as a PSBT cold signer (decode, sign, finalize BIP-174 files from Sparrow / Electrum / Core, including HD signing via the PSBT's own derivation paths), sign EIP-712 typed data (the chain behind every signTypedData prompt, pinned to the EIP's own example), prove address ownership with BIP-322 signed messages (the BIP's own Core-made signatures verify here), OPTIONALLY read balances and broadcast over the engine's HTTP (a separate opt-in module that never touches a key), agree on an ECDH secret, restore or create a BIP-32/39 HD wallet on every standard path (BIP-44/49/84/86 and Ethereum), build and DECODE legacy / nested-SegWit / SegWit / Taproot / Ethereum addresses plus WIF and xprv/xpub, and hash with SHA-2, SHA-3, Keccak-256, RIPEMD-160 and HMAC - without shipping a wallet, a node, or a browser plugin. It adds no cryptography of its own; every curve op and hash is trezor-crypto's. Every checksum is verified on decode and every malformed input fails closed. The app owns key custody and confirm-before-sign; CoinXT signs only the exact digest it is handed.", kClrInkSoft
    cxdButton "about:selftest", "48,298,300,328", "Run the full self-test", "primary"
    cxdMono "about:out", "48,338,1152,586"
    cxdLabel "about:status", "48,596,1152,628", "Click Run the full self-test to check every primitive against a public vector.", kClrInkSoft, 12, "plain"
@@ -685,6 +703,7 @@ on restyleTabs
    styleTab "ui:tabHash", (sTab is "hash")
    styleTab "ui:tabSeed", (sTab is "seed")
    styleTab "ui:tabTool", (sTab is "tool")
+   styleTab "ui:tabOnline", (sTab is "online")
    styleTab "ui:tabDec", (sTab is "dec")
    styleTab "ui:tabAbout", (sTab is "about")
 end restyleTabs
@@ -733,6 +752,8 @@ on mouseUp
       handleSeed tRole
    else if tPrefix is "tool" then
       handleTool tRole
+   else if tPrefix is "online" then
+      handleOnline tRole
    else if tPrefix is "dec" then
       handleDecode tRole
    else if tPrefix is "about" then
@@ -763,6 +784,8 @@ on handleChrome pRole
       showTab "seed"
    else if pRole is "tabTool" then
       showTab "tool"
+   else if pRole is "tabOnline" then
+      showTab "online"
    else if pRole is "tabDec" then
       showTab "dec"
    else if pRole is "tabAbout" then
@@ -1961,6 +1984,134 @@ on doToolScan
       cxdStatus "tool:status", "Verified: this wallet derives that address at " & tFound & " (chain 0 = receive, 1 = change).", "ok"
    end if
 end doToolScan
+
+-- ------------------------------------------------------------------ Online tab actions
+on handleOnline pRole
+   if pRole is "balance" then
+      doOnlineBalance
+   else if pRole is "utxos" then
+      doOnlineUtxos
+   else if pRole is "net" then
+      doOnlineNet
+   else if pRole is "broadcast" then
+      doOnlineBroadcast
+   end if
+end handleOnline
+
+-- the online module is optional and separate: wrap every cxo* call in
+-- try/catch so a build without it degrades to a clear message (the SodiumXT
+-- capability-gate pattern), never an uncaught engine error.
+private function cxdOnlineReady
+   local tErr
+   try
+      get cxoEndpoint()
+      return true
+   catch tErr
+      cxdStatus "online:status", "The coinxt-online module is not loaded (it is optional; start using it to enable this tab).", "bad"
+      return false
+   end try
+end cxdOnlineReady
+
+on doOnlineNet
+   local tErr
+   if cxdOnlineReady() is false then
+      exit doOnlineNet
+   end if
+   try
+      if the label of button "online:net" contains "testnet" then
+         cxoSetEndpoint "https://blockstream.info/api"
+         set the label of button "online:net" to "Network: mainnet"
+         put "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4" into field "online:addr"
+         cxdStatus "online:status", "MAINNET endpoint. Queries now touch real balances - and leak the address to the explorer.", "bad"
+      else
+         cxoSetEndpoint "https://blockstream.info/testnet/api"
+         set the label of button "online:net" to "Network: testnet"
+         put "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx" into field "online:addr"
+         cxdStatus "online:status", "Back to the testnet explorer.", "ok"
+      end if
+   catch tErr
+      cxdStatus "online:status", "Could not set the endpoint.", "bad"
+   end try
+end doOnlineNet
+
+on doOnlineBalance
+   local tErr
+   local tBal
+   if cxdOnlineReady() is false then
+      exit doOnlineBalance
+   end if
+   try
+      put cxoBalance(word 1 to -1 of field "online:addr") into tBal
+   catch tErr
+      cxdStatus "online:status", "The online module raised an error.", "bad"
+      exit doOnlineBalance
+   end try
+   if cxoIsError(tBal) then
+      put tBal into field "online:out"
+      cxdStatus "online:status", "Lookup failed (network, or the explorer returned something unparseable - fail closed).", "bad"
+      exit doOnlineBalance
+   end if
+   put "address   " & (word 1 to -1 of field "online:addr") & return \
+      & "balance   " & tBal & " sats  (" & (tBal / 100000000) & " BTC), confirmed" into field "online:out"
+   cxdStatus "online:status", "Confirmed balance read live. This told the explorer the address is one you care about.", "ok"
+end doOnlineBalance
+
+on doOnlineUtxos
+   local tErr
+   local tUtxos
+   local tLine
+   local tOut
+   if cxdOnlineReady() is false then
+      exit doOnlineUtxos
+   end if
+   try
+      put cxoUtxos(word 1 to -1 of field "online:addr") into tUtxos
+   catch tErr
+      cxdStatus "online:status", "The online module raised an error.", "bad"
+      exit doOnlineUtxos
+   end try
+   if cxoIsError(tUtxos) then
+      put tUtxos into field "online:out"
+      cxdStatus "online:status", "Lookup failed (fail closed on a bad response).", "bad"
+      exit doOnlineUtxos
+   end if
+   if tUtxos is empty then
+      put "No UTXOs at this address (nothing to spend)." into field "online:out"
+      cxdStatus "online:status", "No unspent outputs found.", "ok"
+      exit doOnlineUtxos
+   end if
+   put "txid                                                              vout  sats        confirmed" & return into tOut
+   repeat for each line tLine in tUtxos
+      put word 1 of tLine && word 2 of tLine && word 3 of tLine && word 4 of tLine & return after tOut
+   end repeat
+   put tOut into field "online:out"
+   cxdStatus "online:status", "These are the exact outpoints the BTC Tx tab needs to build a spend (txid + vout + amount).", "ok"
+end doOnlineUtxos
+
+on doOnlineBroadcast
+   local tErr
+   local tRes
+   if cxdOnlineReady() is false then
+      exit doOnlineBroadcast
+   end if
+   if word 1 to -1 of field "online:tx" is empty then
+      cxdStatus "online:status", "Paste a signed raw transaction (from BTC Tx or PSBT) to broadcast.", "bad"
+      exit doOnlineBroadcast
+   end if
+   try
+      put cxoBroadcast(word 1 to -1 of field "online:tx") into tRes
+   catch tErr
+      cxdStatus "online:status", "The online module raised an error.", "bad"
+      exit doOnlineBroadcast
+   end try
+   if cxoIsError(tRes) then
+      put tRes into field "online:out"
+      cxdStatus "online:status", "Broadcast rejected (the node's reason is shown) - fail closed.", "bad"
+      exit doOnlineBroadcast
+   end if
+   put "BROADCAST OK" & return & "txid  " & tRes into field "online:out"
+   cxdStatus "online:status", "Accepted by the network. On mainnet this is irreversible - only ever broadcast a tx you built and reviewed.", "ok"
+end doOnlineBroadcast
 
 -- ------------------------------------------------------------------ Decode tab actions
 on handleDecode pRole
