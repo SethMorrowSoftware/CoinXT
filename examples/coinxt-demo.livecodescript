@@ -380,17 +380,18 @@ on buildUI
 
    -- tab bar: twelve equal tabs on one 96px rhythm, full labels, flush
    -- with the panel edges
-   cxdButton "ui:tabKeys", "24,74,117,104", "Keys", "idle"
-   cxdButton "ui:tabAddr", "120,74,213,104", "Addresses", "idle"
-   cxdButton "ui:tabSign", "216,74,309,104", "Sign", "idle"
-   cxdButton "ui:tabSchn", "312,74,405,104", "Schnorr", "idle"
-   cxdButton "ui:tabEth", "408,74,501,104", "Ethereum", "idle"
-   cxdButton "ui:tabBtx", "504,74,597,104", "BTC Tx", "idle"
-   cxdButton "ui:tabPsbt", "600,74,693,104", "PSBT", "idle"
-   cxdButton "ui:tabEcdh", "696,74,789,104", "ECDH", "idle"
-   cxdButton "ui:tabHash", "792,74,885,104", "Hashes", "idle"
-   cxdButton "ui:tabSeed", "888,74,981,104", "Wallet", "idle"
-   cxdButton "ui:tabDec", "984,74,1077,104", "Decode", "idle"
+   cxdButton "ui:tabKeys", "24,74,109,104", "Keys", "idle"
+   cxdButton "ui:tabAddr", "112,74,197,104", "Addresses", "idle"
+   cxdButton "ui:tabSign", "200,74,285,104", "Sign", "idle"
+   cxdButton "ui:tabSchn", "288,74,373,104", "Schnorr", "idle"
+   cxdButton "ui:tabEth", "376,74,461,104", "Ethereum", "idle"
+   cxdButton "ui:tabBtx", "464,74,549,104", "BTC Tx", "idle"
+   cxdButton "ui:tabPsbt", "552,74,637,104", "PSBT", "idle"
+   cxdButton "ui:tabEcdh", "640,74,725,104", "ECDH", "idle"
+   cxdButton "ui:tabHash", "728,74,813,104", "Hashes", "idle"
+   cxdButton "ui:tabSeed", "816,74,901,104", "Wallet", "idle"
+   cxdButton "ui:tabTool", "904,74,989,104", "Tools", "idle"
+   cxdButton "ui:tabDec", "992,74,1077,104", "Decode", "idle"
    cxdButton "ui:tabAbout", "1080,74,1173,104", "About", "idle"
 
    -- content panel + footer
@@ -407,6 +408,7 @@ on buildUI
    buildEcdhTab
    buildHashTab
    buildSeedTab
+   buildToolTab
    buildDecodeTab
    buildAboutTab
 end buildUI
@@ -606,6 +608,22 @@ on buildSeedTab
    cxdLabel "seed:status", "48,596,1152,628", "Click Restore to rebuild the canonical test wallet, or Generate for a fresh phrase (SodiumXT entropy if loaded, else a fixed DEMO value).", kClrInkSoft, 12, "plain"
 end buildSeedTab
 
+-- ---- Tools tab (the workflow layer: files, profiles, gap-scan)
+on buildToolTab
+   cxdHdr "tool:h", "48,128,1152,156", "Wallet tools: watch-only export, files, and the is-this-address-mine check"
+   cxdCap "tool:p", "48,158,1152,206", "The workflow around the crypto, all app-layer (CoinXT stays a calculator; storage is the app's). Build profile writes a WATCH-ONLY export of the Wallet tab's phrase - fingerprint, every account xpub, first addresses - safe to keep on a hot machine. Save/Load round-trip the text box to a file (profiles, PSBTs, raw transactions). Scan answers the question that prevents the classic address-swap loss: is this address REALLY one of mine?", kClrInkSoft
+   cxdButton "tool:profile", "48,214,296,244", "Build watch-only profile", "primary"
+   cxdButton "tool:save", "308,214,478,244", "Save to file...", "idle"
+   cxdButton "tool:load", "490,214,660,244", "Load from file...", "idle"
+   cxdCap "tool:scanLabel", "48,252,1152,270", "Scan the Wallet tab's phrase for an address (receive + change, first 20 of every standard chain):", kClrInkMute
+   cxdInput "tool:addr", "48,272,700,302", "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+   cxdButton "tool:scan", "712,272,912,302", "Scan: is it mine?", "primary"
+   cxdCap "tool:ioLabel", "48,310,1152,328", "File box (profiles land here; Save writes it out, Load fills it back in):", kClrInkMute
+   cxdInput "tool:io", "48,330,1152,440", ""
+   cxdMono "tool:out", "48,448,1152,586"
+   cxdLabel "tool:status", "48,596,1152,628", "Build a profile from the Wallet tab's phrase, or paste an address and Scan.", kClrInkSoft, 12, "plain"
+end buildToolTab
+
 -- ---- Decode / inspect tab
 on buildDecodeTab
    cxdHdr "dec:h", "48,128,1152,156", "Paste anything: verify its checksum and take it apart"
@@ -657,6 +675,7 @@ on restyleTabs
    styleTab "ui:tabEcdh", (sTab is "ecdh")
    styleTab "ui:tabHash", (sTab is "hash")
    styleTab "ui:tabSeed", (sTab is "seed")
+   styleTab "ui:tabTool", (sTab is "tool")
    styleTab "ui:tabDec", (sTab is "dec")
    styleTab "ui:tabAbout", (sTab is "about")
 end restyleTabs
@@ -703,6 +722,8 @@ on mouseUp
       handleHash tRole
    else if tPrefix is "seed" then
       handleSeed tRole
+   else if tPrefix is "tool" then
+      handleTool tRole
    else if tPrefix is "dec" then
       handleDecode tRole
    else if tPrefix is "about" then
@@ -731,6 +752,8 @@ on handleChrome pRole
       showTab "hash"
    else if pRole is "tabSeed" then
       showTab "seed"
+   else if pRole is "tabTool" then
+      showTab "tool"
    else if pRole is "tabDec" then
       showTab "dec"
    else if pRole is "tabAbout" then
@@ -1749,6 +1772,163 @@ on doRestore
    put empty into tChain
    cxdStatus "seed:status", "Wallet restored: every standard account, plus ten addresses per chain to verify fidelity against any wallet. Demo phrases are PUBLIC - never fund them.", "ok"
 end doRestore
+
+-- ------------------------------------------------------------------ Tools tab actions
+on handleTool pRole
+   if pRole is "profile" then
+      doToolProfile
+   else if pRole is "save" then
+      doToolSave
+   else if pRole is "load" then
+      doToolLoad
+   else if pRole is "scan" then
+      doToolScan
+   end if
+end handleTool
+
+-- a master node from the Wallet tab's phrase, or empty (status already set)
+private function cxdToolMaster
+   local tMnem
+   local tMaster
+   put word 1 to -1 of field "seed:mnem" into tMnem
+   if cxMnemonicValidate(tMnem) is false then
+      cxdStatus "tool:status", "The Wallet tab's seed phrase does not validate - fix it there first.", "bad"
+      return empty
+   end if
+   put cxHdFromSeed(cxMnemonicToSeed(tMnem, field "seed:pp")) into tMaster
+   if cxIsError(tMaster) then
+      cxdStatus "tool:status", tMaster, "bad"
+      return empty
+   end if
+   return tMaster
+end cxdToolMaster
+
+-- the WATCH-ONLY profile: fingerprint + every account xpub + first
+-- addresses. No private material: safe to store and share with a
+-- coordinator; it can derive receiving addresses but sign nothing.
+on doToolProfile
+   local tMaster
+   local tAcct
+   local tLeaf
+   local tOut
+   put cxdToolMaster() into tMaster
+   if tMaster is empty then
+      exit doToolProfile
+   end if
+   put "CoinXT watch-only profile v1" & return into tOut
+   put "fingerprint " & cxHexEncode(byte 1 to 4 of cxHash160(cxHdPubkey(tMaster))) & return after tOut
+   put cxHdDerivePath(tMaster, "m/44'/0'/0'") into tAcct
+   put "xpub44  " & cxXpub(tAcct, true) & return after tOut
+   put cxHdDerivePath(tMaster, "m/49'/0'/0'") into tAcct
+   put "xpub49  " & cxXpub(tAcct, true) & return after tOut
+   put cxHdDerivePath(tMaster, "m/84'/0'/0'") into tAcct
+   put "xpub84  " & cxXpub(tAcct, true) & return after tOut
+   put cxHdDerivePath(tMaster, "m/86'/0'/0'") into tAcct
+   put "xpub86  " & cxXpub(tAcct, true) & return after tOut
+   put cxHdDerivePath(tMaster, "m/44'/60'/0'") into tAcct
+   put "xpubEth " & cxXpub(tAcct, true) & return after tOut
+   put cxHdDerivePath(tMaster, "m/84'/0'/0'/0/0") into tLeaf
+   put "addr84-0 " & cxBtcAddressP2WPKH(cxHdPubkey(tLeaf), true) & return after tOut
+   put cxHdDerivePath(tMaster, "m/44'/60'/0'/0/0") into tLeaf
+   put "addrEth-0 " & cxEthAddress(cxHdPubkey(tLeaf)) after tOut
+   put empty into tMaster
+   put empty into tAcct
+   put empty into tLeaf
+   put tOut into field "tool:io"
+   cxdStatus "tool:status", "Watch-only profile built (NO private material). Save it to a file, or hand it to a coordinator.", "ok"
+end doToolProfile
+
+on doToolSave
+   ask file "Save the file box as" with "coinxt-export.txt"
+   if it is empty then
+      cxdStatus "tool:status", "Save cancelled.", "bad"
+      exit doToolSave
+   end if
+   put field "tool:io" into URL ("file:" & it)
+   cxdStatus "tool:status", "Saved. Files are the app's job (SPEC rule 2); CoinXT itself stores nothing.", "ok"
+end doToolSave
+
+on doToolLoad
+   answer file "Choose a file to load into the file box"
+   if it is empty then
+      cxdStatus "tool:status", "Load cancelled.", "bad"
+      exit doToolLoad
+   end if
+   put URL ("file:" & it) into field "tool:io"
+   cxdStatus "tool:status", "Loaded. Copy a PSBT to the PSBT tab, a raw tx to Decode, or read a profile here.", "ok"
+end doToolLoad
+
+-- the address-swap defence: derive the first 20 receive + change addresses
+-- of EVERY standard chain from the phrase and look for the pasted address.
+-- Fund an address only when this says MINE with the path you expect.
+on doToolScan
+   local tTarget
+   local tMaster
+   local tPaths
+   local tPathLine
+   local tChainIdx
+   local tChain
+   local tI
+   local tNode
+   local tAddr
+   local tFound
+   put word 1 to -1 of field "tool:addr" into tTarget
+   if tTarget is empty then
+      cxdStatus "tool:status", "Paste an address to look for first.", "bad"
+      exit doToolScan
+   end if
+   put cxdToolMaster() into tMaster
+   if tMaster is empty then
+      exit doToolScan
+   end if
+   put "m/44'/0'/0',legacy" & return & "m/49'/0'/0',nested" & return \
+      & "m/84'/0'/0',segwit" & return & "m/86'/0'/0',taproot" & return \
+      & "m/44'/60'/0',eth" into tPaths
+   put empty into tFound
+   repeat for each line tPathLine in tPaths
+      repeat with tChainIdx = 0 to 1
+         put cxHdDerivePath(tMaster, item 1 of tPathLine & "/" & tChainIdx) into tChain
+         if cxIsError(tChain) then
+            next repeat
+         end if
+         repeat with tI = 0 to 19
+            put cxHdDerive(tChain, tI, false) into tNode
+            if item 2 of tPathLine is "legacy" then
+               put cxBtcAddressP2PKH(cxHdPubkey(tNode), true) into tAddr
+            else if item 2 of tPathLine is "nested" then
+               put cxBtcAddressP2SH_P2WPKH(cxHdPubkey(tNode), true) into tAddr
+            else if item 2 of tPathLine is "segwit" then
+               put cxBtcAddressP2WPKH(cxHdPubkey(tNode), true) into tAddr
+            else if item 2 of tPathLine is "taproot" then
+               put cxBtcAddressP2TR(cxHdPubkey(tNode), true) into tAddr
+            else
+               put cxEthAddress(cxHdPubkey(tNode)) into tAddr
+            end if
+            -- ETH compares case-folded (EIP-55 is presentation); BTC exact
+            if tAddr is tTarget or (item 2 of tPathLine is "eth" and toLower(tAddr) is toLower(tTarget)) then
+               put item 1 of tPathLine & "/" & tChainIdx & "/" & tI into tFound
+               exit repeat
+            end if
+         end repeat
+         if tFound is not empty then
+            exit repeat
+         end if
+      end repeat
+      if tFound is not empty then
+         exit repeat
+      end if
+   end repeat
+   put empty into tMaster
+   put empty into tChain
+   put empty into tNode
+   if tFound is empty then
+      put "NOT MINE (searched receive+change 0..19 of m/44'/49'/84'/86' and eth)" & return & "address: " & tTarget into field "tool:out"
+      cxdStatus "tool:status", "NOT found in this wallet's standard chains. Do NOT fund it assuming it is yours - this is how address-swap malware wins.", "bad"
+   else
+      put "MINE at " & tFound & return & "address: " & tTarget into field "tool:out"
+      cxdStatus "tool:status", "Verified: this wallet derives that address at " & tFound & " (chain 0 = receive, 1 = change).", "ok"
+   end if
+end doToolScan
 
 -- ------------------------------------------------------------------ Decode tab actions
 on handleDecode pRole
