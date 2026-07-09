@@ -615,12 +615,21 @@ on buildToolTab
    cxdButton "tool:profile", "48,214,296,244", "Build watch-only profile", "primary"
    cxdButton "tool:save", "308,214,478,244", "Save to file...", "idle"
    cxdButton "tool:load", "490,214,660,244", "Load from file...", "idle"
+   cxdButton "tool:qrgo", "672,214,860,244", "QR the file box", "idle"
    cxdCap "tool:scanLabel", "48,252,1152,270", "Scan the Wallet tab's phrase for an address (receive + change, first 20 of every standard chain):", kClrInkMute
    cxdInput "tool:addr", "48,272,700,302", "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
    cxdButton "tool:scan", "712,272,912,302", "Scan: is it mine?", "primary"
-   cxdCap "tool:ioLabel", "48,310,1152,328", "File box (profiles land here; Save writes it out, Load fills it back in):", kClrInkMute
-   cxdInput "tool:io", "48,330,1152,440", ""
-   cxdMono "tool:out", "48,448,1152,586"
+   cxdCap "tool:ioLabel", "48,310,700,328", "File box (profiles land here; Save writes, Load fills, QR renders):", kClrInkMute
+   cxdInput "tool:io", "48,330,700,440", ""
+   cxdMono "tool:out", "48,448,700,586"
+   -- the air-gap surface: the file box as a QR, rendered by the ENGINE's
+   -- qrCreate library (compose, never hand-roll - the same rule as the
+   -- crypto). Created hidden-safe: showTab toggles it by prefix like any
+   -- other control.
+   if there is no image "tool:qr" then
+      create image "tool:qr"
+   end if
+   set the rectangle of image "tool:qr" to "760,310,1036,586"
    cxdLabel "tool:status", "48,596,1152,628", "Build a profile from the Wallet tab's phrase, or paste an address and Scan.", kClrInkSoft, 12, "plain"
 end buildToolTab
 
@@ -1783,8 +1792,31 @@ on handleTool pRole
       doToolLoad
    else if pRole is "scan" then
       doToolScan
+   else if pRole is "qrgo" then
+      doToolQr
    end if
 end handleTool
+
+-- render the file box as a QR code for air-gap transfer (a PSBT or profile
+-- crosses to a phone / another machine without a wire). The ENGINE's
+-- qrCreate library does the encoding - CoinXT rolls no QR of its own, the
+-- compose-audited-code rule - and a build without the library degrades to a
+-- clean message inside the try/catch (the SodiumXT capability-gate pattern).
+on doToolQr
+   local tErr
+   local tText
+   put field "tool:io" into tText
+   if tText is empty then
+      cxdStatus "tool:status", "Nothing to encode: build a profile or load a file into the file box first.", "bad"
+      exit doToolQr
+   end if
+   try
+      qrCreate the long id of image "tool:qr", tText, "M", 3
+      cxdStatus "tool:status", "Scan it with any wallet or phone. QR is how a PSBT crosses an air gap without a cable.", "ok"
+   catch tErr
+      cxdStatus "tool:status", "This engine build has no qrCreate library - showing nothing rather than a wrong code.", "bad"
+   end try
+end doToolQr
 
 -- a master node from the Wallet tab's phrase, or empty (status already set)
 private function cxdToolMaster

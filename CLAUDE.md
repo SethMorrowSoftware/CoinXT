@@ -729,3 +729,12 @@ check). The demo is now thirteen tabs; the new Tools tab holds:
   SPEC amendment.
 - Honest status: NEEDS AN ON-ENGINE PASS (pure demo flows; `ask file`/`answer file`/URL file: are
   the engine-sensitive pieces).
+
+**Phase 7b - QR air-gap transfer via the ENGINE's qrCreate (2026-07-09).** The owner pointed out
+LC/OXT ships a QR generator, so the planned hand-rolled Reed-Solomon round was DROPPED - the
+compose-audited-code rule applies to QR exactly as it does to crypto. The Tools tab gained a "QR
+the file box" button + an image: `qrCreate <long id of image>, <text>, "M", 3` inside try/catch
+(the SodiumXT capability-gate pattern), so a build without the library degrades to a clean
+message instead of a wrong code. NEEDS AN ON-ENGINE PASS: confirm the qrCreate signature this
+OXT build ships (args order/level/size) and record it here; the try/catch keeps a mismatch
+harmless.
