@@ -710,3 +710,22 @@ modern-signing round, delivered. Pure script (no native change, ABI 3, binaries 
 - Demo: the Sign tab gained a BIP-322 row (sign a proof with the current key; check a pasted
   address + base64 proof against the message field - Sparrow / Core signatures verify here).
 - Honest status: NEEDS AN ON-ENGINE PASS (`testBip322` is the checklist).
+
+**Phase 7a - the tool workflow: files, watch-only profiles, gap-scan (2026-07-09).** Demo-layer
+ONLY, deliberately: SPEC rule 2 says storage and workflow are the APP's, so no library function
+was added and no new crypto path exists (nothing new to KAT; the static gates are the whole
+check). The demo is now thirteen tabs; the new Tools tab holds:
+
+- **Build watch-only profile**: fingerprint + the five account xpubs (BIP-44/49/84/86 + eth) +
+  first addresses from the Wallet tab's phrase, composed text, NO private material - the export a
+  coordinator or hot machine keeps.
+- **Save/Load**: `ask file` / `answer file` + URL file: round-trips of the file box (profiles,
+  PSBTs, raw tx hex). CoinXT itself still stores nothing.
+- **Scan (is this address mine?)**: derives receive+change 0..19 of every standard chain from the
+  phrase and looks for a pasted address - the defence against address-swap malware; ETH compares
+  case-folded (EIP-55 is presentation), BTC exact.
+- Deferred, recorded: QR generation for air-gap transfer is round 3b (a Reed-Solomon build that
+  deserves its own vector-locked round); the opt-in online layer is round 4 and starts with a
+  SPEC amendment.
+- Honest status: NEEDS AN ON-ENGINE PASS (pure demo flows; `ask file`/`answer file`/URL file: are
+  the engine-sensitive pieces).

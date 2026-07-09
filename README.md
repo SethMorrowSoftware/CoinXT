@@ -88,7 +88,9 @@ CoinXT/
                                   paths), ECDH with pasted peer keys, the Keccak-vs-SHA3
                                   footgun + HMAC, wallet RESTORE from any BIP-39 phrase with a
                                   ten-address fidelity listing and a derivation-path explorer,
-                                  a decode-anything inspector, self-test)
+                                  a Tools tab (watch-only profile export, save/load files, and
+                                  an is-this-address-mine gap-scan), a decode-anything
+                                  inspector, self-test)
     coinxt-tests.livecodescript   the on-engine self-test harness: put cxSelfTest()
 ```
 
