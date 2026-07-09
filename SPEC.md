@@ -30,12 +30,39 @@ It **is**:
 
 It is **NOT**:
 - A key manager or a wallet UI. The app owns key storage, backup, and the confirm-before-sign UX.
-- A network layer. CoinXT never touches a peer, a node, or an RPC endpoint. It produces signed bytes;
-  the app broadcasts them (optionally over Tor via OnionXT, doc-level composition only).
 - A source of consensus truth. It does not validate a chain, a UTXO set, or a nonce. It signs what it is
   told to sign; the app is responsible for constructing the correct sighash / transaction.
 - New cryptography. Every curve op and hash is trezor-crypto's; CoinXT adds no cipher of its own (the
   same rule SodiumXT and OnionXT hold).
+
+The **core** (`src/coinxt.livecodescript` + the shim) is NOT a network layer: it never touches a peer, a
+node, or an RPC endpoint, holds no key beyond one call, and is a pure function of its inputs. That is the
+security boundary and it does not move.
+
+### 1.1 The optional online layer (`cxo*`, a SEPARATE opt-in module)
+
+`src/coinxt-online.livecodescript` is an OPTIONAL companion the app loads deliberately (`start using` it,
+exactly as it opts into SodiumXT). It composes the ENGINE's HTTP (and, if the app routes through OnionXT,
+Tor) to do the two things a pure signer cannot: READ chain state (an address's UTXOs, its balance, a fee
+rate) and WRITE an already-signed transaction to the network. It is `cxo`-prefixed and lives in its own
+file so the offline core stays auditably network-free and key-free; the core never gains a network call.
+
+The rules that keep this honest, and MUST hold:
+
+- **It never touches a private key.** It fetches read-only data and broadcasts bytes the offline core
+  already signed. Signing stays in the core, behind confirm-before-sign.
+- **An explorer's answer is UNTRUSTED input.** A queried server can lie about balances, UTXOs, or fees.
+  So a response is parsed FAIL-CLOSED (a malformed body is a clean `"CoinXT: ..."` error, never a
+  guessed value), and the human still confirms every amount and destination before the core signs. A
+  parser bug can feed a wrong amount to the tx builder, never forge a signature; the on-screen fee is
+  the backstop.
+- **Querying leaks your addresses.** Asking a public explorer about your address tells that server the
+  address is yours, and broadcasting reveals your IP. This is a PRIVACY cost, documented loudly. The
+  endpoint is configurable so the app can point at ITS OWN node or a Tor hidden service (the OnionXT
+  composition), which is the private way to use it.
+- **Determinism holds where it can.** The response PARSERS are pure functions, transcribed to Python and
+  vector-locked in `tools/coin-kat.py` against representative Esplora-shape fixtures (documented as
+  schema fixtures, not a captured live response); only the thin HTTP verb itself needs an on-engine pass.
 
 ## 2. Why trezor-crypto, and the license
 

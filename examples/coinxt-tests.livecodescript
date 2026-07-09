@@ -186,6 +186,7 @@ function cxSelfTest
    testPsbt
    testEip712
    testBip322
+   testOnline
    testMnemonics
    testHd
    testSchnorr
@@ -672,6 +673,51 @@ on testBip322
    put empty into tSk
    put empty into tDec
 end testBip322
+
+-- the OPTIONAL online layer's response PARSERS (pure, no network). The
+-- module is separate and opt-in, so probe it in try/catch: if it is not
+-- loaded, report one clean skip line rather than erroring the whole harness.
+on testOnline
+   local tErr
+   local tUtxo
+   local tAddrBody
+   local tFeeBody
+   cxtSection "online layer parsers (cxoParse*, no network)"
+   -- build the Esplora-shape fixtures here (a single quote stands in for a
+   -- JSON double quote, replaced at runtime - avoids embedded quotes in a
+   -- constant, which some OXT parsers reject)
+   put cxtJson("[{'txid':'12b5633bad1f9c167d523ad1aa1947b2732a865bf5414eab2f9e5ae1d8c72e26','vout':0,'status':{'confirmed':true,'block_height':698329},'value':420000}]") into tUtxo
+   put cxtJson("{'chain_stats':{'funded_txo_sum':1500000,'spent_txo_sum':600000},'mempool_stats':{'funded_txo_sum':999}}") into tAddrBody
+   put cxtJson("{'1':87.882,'6':68.285,'1008':1.0}") into tFeeBody
+   -- the module is separate and opt-in; a missing one reports one skip line
+   try
+      put cxoParseUtxos(tUtxo) into tUtxo
+   catch tErr
+      cxtCheck true, "SKIPPED: the optional coinxt-online module is not loaded (start using it to test)"
+      exit testOnline
+   end try
+   cxtCheck (word 1 of tUtxo is "12b5633bad1f9c167d523ad1aa1947b2732a865bf5414eab2f9e5ae1d8c72e26" \
+      and word 2 of tUtxo is "0" and word 3 of tUtxo is "420000" and word 4 of tUtxo is "true"), \
+      "cxoParseUtxos extracts txid / vout / value / confirmed"
+   cxtCheck cxoIsError(cxoParseUtxos(cxtJson("[{'txid':0"))), \
+      "a truncated UTXO body fails closed"
+   cxtCheck (cxoParseBalance(tAddrBody) is 900000), \
+      "cxoParseBalance returns funded minus spent (not the mempool figure)"
+   cxtCheck cxoIsError(cxoParseBalance(cxtJson("{'x':1}"))), \
+      "a body without chain_stats fails closed"
+   cxtCheck (cxoParseFeeRate(tFeeBody, "6") is 69), \
+      "cxoParseFeeRate rounds the 6-block target up"
+   cxtCheck cxoIsError(cxoParseFeeRate(tFeeBody, "3")), \
+      "a missing fee target fails closed"
+end testOnline
+
+-- a JSON fixture with single quotes standing in for double quotes
+private function cxtJson pStr
+   local tS
+   put pStr into tS
+   replace "'" with quote in tS
+   return tS
+end cxtJson
 
 -- the demo's headline flow, end to end on-engine: the canonical mnemonic
 -- restores to the published first addresses of every standard path (the

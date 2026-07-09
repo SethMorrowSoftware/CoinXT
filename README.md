@@ -64,6 +64,8 @@ CoinXT/
     coinxt.lcb              the foreign-handler module (binds to cnx_*; needs an on-engine pass)
     coinxt.livecodescript   the public cx* API + the phase-3 encodings (hex, Base58Check, Bech32,
                             EIP-55), the BTC/ETH address builders, and BIP-39 mnemonics
+    coinxt-online.livecodescript  the OPTIONAL, opt-in online layer (cxo*): read balances/UTXOs and
+                            broadcast over the engine's HTTP; never touches a key (SPEC 1.1)
     code/                   committed per-platform native libraries (coinxt.so/.dll/.dylib), laid
                             down by CI on main + pinned in src/code/MANIFEST.sha256
   data/
@@ -88,8 +90,9 @@ CoinXT/
                                   paths), ECDH with pasted peer keys, the Keccak-vs-SHA3
                                   footgun + HMAC, wallet RESTORE from any BIP-39 phrase with a
                                   ten-address fidelity listing and a derivation-path explorer,
-                                  a Tools tab (watch-only profile export, save/load files, and
-                                  an is-this-address-mine gap-scan), a decode-anything
+                                  a Tools tab (watch-only profile export, save/load files, QR
+                                  air-gap transfer via the engine's qrCreate, and an
+                                  is-this-address-mine gap-scan), a decode-anything
                                   inspector, self-test)
     coinxt-tests.livecodescript   the on-engine self-test harness: put cxSelfTest()
 ```

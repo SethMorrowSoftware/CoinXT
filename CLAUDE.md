@@ -729,3 +729,43 @@ check). The demo is now thirteen tabs; the new Tools tab holds:
   SPEC amendment.
 - Honest status: NEEDS AN ON-ENGINE PASS (pure demo flows; `ask file`/`answer file`/URL file: are
   the engine-sensitive pieces).
+
+**Phase 7b - QR air-gap transfer via the ENGINE's qrCreate (2026-07-09).** The owner pointed out
+LC/OXT ships a QR generator, so the planned hand-rolled Reed-Solomon round was DROPPED - the
+compose-audited-code rule applies to QR exactly as it does to crypto. The Tools tab gained a "QR
+the file box" button + an image: `qrCreate <long id of image>, <text>, "M", 3` inside try/catch
+(the SodiumXT capability-gate pattern), so a build without the library degrades to a clean
+message instead of a wrong code. NEEDS AN ON-ENGINE PASS: confirm the qrCreate signature this
+OXT build ships (args order/level/size) and record it here; the try/catch keeps a mismatch
+harmless.
+
+**Phase 8 - the OPTIONAL online layer (2026-07-09).** The one round that crosses the old "not a
+broadcaster" line, so it opened with a SPEC amendment (section 1.1, owner-approved) FIRST: the
+online layer is a SEPARATE, opt-in module, explicitly outside the trusted offline core, which is
+unchanged and remains the security boundary.
+
+- `src/coinxt-online.livecodescript` (new file, `cxo*` prefix, loaded with its own `start using`).
+  It composes the ENGINE's HTTP (`URL` get / `post ... to URL`) to READ chain state (an address's
+  UTXOs, confirmed balance, a fee rate) from an Esplora-compatible endpoint and to WRITE an
+  already-signed tx. It NEVER touches a private key; signing stays in the core.
+- The three invariants that keep it honest (SPEC 1.1), enforced: (a) an explorer answer is
+  UNTRUSTED, so every response parser FAILS CLOSED and the human confirms amounts before the core
+  signs (a parser bug can feed a wrong amount to the builder, never forge a signature; the
+  on-screen fee is the backstop); (b) querying LEAKS your addresses and broadcasting reveals your
+  IP - documented loudly, and the endpoint is configurable so the app can point at its own node or
+  a Tor hidden service (OnionXT); (c) the default endpoint is a public TESTNET explorer, so a
+  first run cannot spend mainnet coins.
+- The response PARSERS are split from the HTTP verbs (`cxoParseUtxos` / `cxoParseBalance` /
+  `cxoParseFeeRate` are PURE), so both coin-kat (`run_online_parse_checks`, a 1:1 Python mirror)
+  and the on-engine harness (`testOnline`) drive them against the SAME Esplora-shape fixtures with
+  NO network - including a 3000-blob fuzz that a parser must never crash on. Honest caveat,
+  recorded: these are SCHEMA fixtures (the documented Esplora response shape), not a captured live
+  response, and the thin HTTP verbs `cxoGet`/`cxoPost` need the on-engine pass. The targeted
+  extraction is depth-aware (a nested key never matches at the wrong level - proven by the
+  chain_stats-vs-mempool_stats balance test).
+- Demo: a fourteenth tab, Online, testnet-first and capability-gated (every `cxo*` call in
+  try/catch, the SodiumXT pattern, so a build without the module degrades cleanly): look up a
+  balance / list UTXOs (the outpoints the BTC Tx tab needs) / broadcast a signed raw tx, with a
+  mainnet/testnet toggle and loud privacy + irreversibility warnings.
+- Honest status: parser-verified and vector-locked; NEEDS AN ON-ENGINE PASS (`testOnline` for the
+  parsers; the live network verbs and the mainnet/testnet endpoints are the on-engine checklist).
