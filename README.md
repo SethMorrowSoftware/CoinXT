@@ -50,51 +50,27 @@ CoinXT/
   SPEC.md                   what CoinXT is: the C/script split, the ABI contract, formats, security model
   IMPLEMENTATION-PLAN.md    the phased build order
   CLAUDE.md                 the operational guide + the FFI/C-ABI law (read before touching the shim)
-  CMakeLists.txt            the family build: the shared library + the ctest smoke test, all 5 platforms
+  MIGRATION.md              how to split CoinXT into its own repository (delete after the move)
   templates/
     CLAUDE.md               the portable xTalk/LiveCode/LCB lesson book (ALL the family's generic
                             engine lessons; copy it to the root of any NEW xTalk project)
-  .github/workflows/ci.yml  the gates + the native platform matrix; commits refreshed binaries on main
+  .github/workflows/ci.yml  the gates in CI (dormant until CoinXT is a repository root)
   native/
     coinxt.c                the C shim (cnx_ ABI over the vendored crypto)
-    build.sh                the no-dependency developer loop (plain lib + ASan/UBSan self-test)
-    MANIFEST.sha256         integrity pins for the vendored SOURCES (the wordlist joins in phase 4)
+    build.sh                builds the shared library, and the ASan + UBSan self-test
+    MANIFEST.sha256         integrity pins: the vendored sources now; release binaries and the
+                            wordlist join in later phases
     vendor/                 the vendored trezor-crypto subset (MIT) + VENDOR.md + LICENSE
-  src/
-    coinxt.lcb              the foreign-handler module (binds to cnx_*; needs an on-engine pass)
-    coinxt.livecodescript   the public cx* API + the phase-3 encodings (hex, Base58Check, Bech32,
-                            EIP-55), the BTC/ETH address builders, and BIP-39 mnemonics
-    coinxt-online.livecodescript  the OPTIONAL, opt-in online layer (cxo*): read balances/UTXOs and
-                            broadcast over the engine's HTTP; never touches a key (SPEC 1.1)
-    code/                   committed per-platform native libraries (coinxt.so/.dll/.dylib), laid
-                            down by CI on main + pinned in src/code/MANIFEST.sha256
-  data/
-    bip39-english.txt       the canonical BIP-39 English wordlist (2048 words), embedded into
-                            coinxt.livecodescript and integrity-checked by coin-kat.py
-  tests/
-    coinxt_smoke_test.c     walks every cnx_ export once (ctest on every CI lane; ASan via build.sh)
+  src/                      (lands with the on-engine binding step)
+    coinxt.lcb              the foreign-handler module (binds to cnx_*)
+    coinxt.livecodescript   the public cx* API + the script-side encodings
   tools/
     coin-kat.py             known-answer vectors (builds the shim headless, drives it via ctypes)
-    package-extension.py    stages src/code/<arch>-<platform>/coinxt.<ext> + its manifest
     check-livecodescript.py the static gate for .lcb / .livecodescript (carried verbatim)
     check-docs-style.py     the house-style gate for .md (carried verbatim)
-  examples/
-    coinxt-demo.livecodescript    the self-building showcase stack: a branded, tabbed UI
-                                  (keys + WIF import/export, five address forms with a testnet
-                                  toggle, ECDSA and Schnorr sign/verify/tamper plus verify-a-
-                                  pasted-signature, EIP-191 personal_sign + ecrecover, COMPLETE
-                                  offline transactions on both chains - EIP-155 Ethereum and
-                                  BIP-143 SegWit Bitcoin, each reproducing its official example
-                                  byte for byte - a PSBT cold-signer tab (decode / sign / finalize
-                                  BIP-174 files, incl. HD signing via the PSBT's derivation
-                                  paths), ECDH with pasted peer keys, the Keccak-vs-SHA3
-                                  footgun + HMAC, wallet RESTORE from any BIP-39 phrase with a
-                                  ten-address fidelity listing and a derivation-path explorer,
-                                  a Tools tab (watch-only profile export, save/load files, QR
-                                  air-gap transfer via the engine's qrCreate, and an
-                                  is-this-address-mine gap-scan), a decode-anything
-                                  inspector, self-test)
-    coinxt-tests.livecodescript   the on-engine self-test harness: put cxSelfTest()
+  examples/                 (later phases)
+    coinxt-demo.livecodescript    keygen, addresses, sign/verify, an HD wallet from a mnemonic
+    coinxt-tests.livecodescript   a pure, offline self-test harness (sPass/sFail, KATs)
 ```
 
 ## The gates (run before any commit)
@@ -107,48 +83,18 @@ sh native/build.sh asan                       # ASan + UBSan native self-test
 ( cd native && sha256sum -c MANIFEST.sha256 ) # vendored-source integrity
 ```
 
-All five run in CI (`.github/workflows/ci.yml`), which additionally builds the native library for the
-full platform matrix (x86_64/x86 Linux, universal macOS, x86_64/x86 Windows via MinGW) on every push,
-runs the C smoke test on each lane, verifies the committed binaries against `src/code/MANIFEST.sha256`,
-and commits freshly built binaries back to `src/code/` on main so a clone ships a working extension
-(the SodiumXT / TorrentXT model). There is no headless way to compile or run `.livecodescript` / `.lcb`
-on OXT, so a script change additionally needs an on-engine pass; the honest status until then is
-"designed and statically reasoned" (see [CLAUDE.md](CLAUDE.md)). On a real engine, run
-`examples/coinxt-tests.livecodescript` (`put cxSelfTest()`) to re-pin the vectors through the cx* API.
+All five run in CI (`.github/workflows/ci.yml`). There is no headless way to compile or run
+`.livecodescript` / `.lcb` on OXT, so a script change additionally needs an on-engine pass; the honest
+status until then is "designed and statically reasoned" (see [CLAUDE.md](CLAUDE.md)).
 
 ## Status
 
-**Phases 1-4 native done and externally verified; the script layer awaits its on-engine pass.** The
-shim (`native/coinxt.c`, ABI 3) over the vendored trezor-crypto subset builds under ASan + UBSan and
-exposes the full hash/KDF surface (SHA-256/512, SHA3-256, Keccak-256, RIPEMD-160, HMAC,
-PBKDF2-HMAC-SHA512), the secp256k1 curve surface (keypair, deterministic RFC 6979 ECDSA - always
-low-s, recoverable signatures + `ecrecover`, ECDH), BIP-32 HD child-key derivation, BIP-340 Schnorr,
-and the BIP-341 Taproot key-path tweak. `tools/coin-kat.py` pins it all headless: the classic public
-RFC 6979 vectors, the seckey range edges, the ecrecover round trip, the official BIP-32 xprv/xpub
-vectors, the official BIP-340 test vectors (sign + verify, including the invalid cases), and the
-BIP-86 Taproot addresses - and, the bar that matters for a money library, CoinXT signatures VERIFY in
-independent implementations (ECDSA in python-ecdsa; Schnorr against a BIP-340 reference carried in the
-harness) and match byte for byte. The BIP-32 CKD and BIP-340/341 schemes are transcribed over the
-audited primitives already vendored (no new vendored files, no `bip32.c` multi-curve tree, no
-secp256k1-zkp). The `.lcb` foreign module and the public `cx*` script API are written and pass the
-static gates; there is no headless OXT compiler, so their honest status is "designed and statically
-reasoned; needs an on-engine pass", and the on-engine self-test harness
-(`examples/coinxt-tests.livecodescript`) plus the self-building demo stack
-(`examples/coinxt-demo.livecodescript`) are ready for that pass; the phases 1-3 stack ran 41/41 on a
-real engine (see [CLAUDE.md](CLAUDE.md)); the ABI-3 additions need their own pass. The build and
-packaging follow the family model: a CMake build, a 5-platform CI matrix, and per-platform binaries
-committed under `src/code/` on main. Addresses, key serialization, and BIP-39 mnemonics are pure
-script: hex, Base58Check, Bech32/Bech32m (encode AND decode), WIF, EIP-55, EIP-191 personal-message
-hashing, RLP (composable encoders that build a complete EIP-155 transaction), strict-DER signature
-framing, address-to-scriptPubKey, a single-input BIP-143 P2WPKH/nested transaction signer, a
-BIP-174 PSBT decode/sign/finalize surface (the Sparrow / Electrum / Core interchange), an EIP-712
-typed-data surface pinned to the EIP's own example, BIP-322 signed messages (Core's published
-signatures verify here), the BTC
-(P2PKH, P2SH-P2WPKH, P2WPKH, P2TR) + ETH address builders, xprv/xpub framing, and the BIP-39
-mnemonic surface over the embedded 2048-word list - all transcription-verified against Python and
-vector-locked in CI (BIP-173/350, BIP-49/84/86, EIP-55, Trezor BIP-39, BIP-32, the published WIF
-vectors, the yellow-paper RLP vectors, the official EIP-155 AND BIP-143 example transactions byte
-for byte, and the canonical-mnemonic wallet-restore path).
+**Design done; phase 1 underway.** The native seam is proven: the shim (`native/coinxt.c`) over the
+vendored trezor-crypto SHA-3 unit builds under ASan + UBSan, exposes `cnx_keccak256` / `cnx_sha3_256`
+(the Ethereum-vs-NIST footgun handled), and passes known-answer vectors headless via
+`tools/coin-kat.py` (Keccak against published vectors, SHA3 against Python `hashlib`). That retires the
+FFI/build pipeline, the family's most expensive area. Next: the secp256k1 curve surface (phase 2), then
+encodings/addresses, HD wallets, and the `.lcb` on-engine binding.
 
 [SPEC.md](SPEC.md), [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md), and [CLAUDE.md](CLAUDE.md) are the
 design and the running as-built log. Every deterministic path is pinned to a public known-answer vector,
@@ -157,7 +103,9 @@ library, not just in CoinXT.
 
 CoinXT is an independent library: it does not depend on OnionXT (the two compose at the documentation
 level only), and everything it needs (the static gates, the CI workflow, the portable engine-lesson
-book, the vendored sources and their manifest) lives in this repository.
+book, the vendored sources and their manifest) lives inside this directory. It is currently staged
+inside the OnionXT repository and is ready to be split into its own repository; the exact procedure and
+the post-split checklist are in [MIGRATION.md](MIGRATION.md). (Remove this paragraph after the move.)
 
 ## A note on handling money
 

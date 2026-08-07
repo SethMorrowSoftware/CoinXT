@@ -133,15 +133,6 @@ on-engine pass. Keep both gates green in CI on every push / PR.
 9. **Socket / control ids are the engine's, not yours.** `open socket to host` and `accept connections`
    name sockets by their `host:port` string (with a numeric or `|`-suffix for multiples). Store the EXACT
    id the engine hands you and use it verbatim in `read` / `write` / `close`; never reconstruct it.
-10. **`the caseSensitive` defaults to FALSE, and it silently corrupts `offset` / `is` / `contains` on
-    case-DISTINCT data.** Comparisons and `offset` fold `A`==`a` by default. On a Base58 alphabet (where
-    an uppercase and a lowercase letter are DIFFERENT digits) an `offset` lookup returns the wrong index
-    (a lowercase `g` matches the earlier uppercase `G`), so the decode produces wrong bytes; on a
-    byte-exact checksum compare it can accept a bad checksum. `set the caseSensitive to true` right where
-    you index an alphabet or compare bytes. It is a LOCAL property (reverts on handler exit), so an early
-    return needs no manual restore - but a *sibling* handler that also compares must set it too. (CONFIRMED
-    on-engine in CoinXT: Base58Check decode returned the wrong payload until this was set; encode was fine
-    because it indexes the alphabet directly instead of via `offset`.)
 
 ## 6. Operators that look like functions (and vice versa)
 
@@ -374,30 +365,3 @@ Seed entries (confirmed on-engine in the family; keep them, add to them):
   CAUSE:   confirmed on-engine: it streams whatever bytes are available, chunk by chunk, as they
            arrive; it does NOT block until the peer closes.
   FIX:     treat it as a streaming read and reassemble/frame by length or delimiter yourself.
-- SYMPTOM: a .livecodescript failed to compile at its FIRST `constant` line (the CoinXT on-engine
-           test-harness pass, 2026-07-08).
-  CAUSE:   `constant kName is <value>` is LCB syntax. livecodescript declares a constant with
-           `constant kName = <value>`. The two languages DIFFER here, and since a whole
-           .livecodescript compiles as one unit, the wrong form kills the entire file.
-  FIX:     `constant kSk1 = "..."` in .livecodescript; `constant kAbiVersion is 2` in .lcb.
-  GATE:    check-livecodescript.py flags the wrong constant form per file type
-           (check_constant_form).
-- SYMPTOM: error strings thrown by LCB handlers and caught by a livecodescript try/catch failed
-           `begins with` prefix tests: the CoinXT harness's five negative-path checks reported FAIL
-           while every positive path passed (on-engine, 2026-07-08).
-  CAUSE:   an error raised inside an LCB extension handler reaches the script catch variable as the
-           engine's STRUCTURED execution-error list (comma-separated code,line,column,hint lines)
-           with the thrown text embedded as a hint field. Only a SCRIPT-level throw arrives verbatim.
-  FIX:     normalize at the catch site: pass a verbatim prefixed message through, otherwise extract
-           from the first occurrence of your prefix to the end of that line (CoinXT's cxMakeError),
-           so the "error values begin with <Lib>:" contract holds for both throw origins.
-  GATE:    not statically detectable (runtime marshalling); recorded here.
-- SYMPTOM: calling a function that lives in a NOT-YET-LOADED sibling script library raises
-           "Function: error in function handler" with the function name as the hint (on-engine,
-           2026-07-08; it read like an ABI failure because the hint was cxCheckABI).
-  CAUSE:   the function message went unhandled: the library holding it was not in scope (start
-           using), so the engine reports an error at the call, not a "missing library" message.
-  FIX:     probe cross-file dependencies inside try/catch and report which layer is missing (the
-           CoinXT examples' preflight); never call a sibling library's functions bare in an
-           entry-point handler.
-  GATE:    not statically detectable across files; recorded here.

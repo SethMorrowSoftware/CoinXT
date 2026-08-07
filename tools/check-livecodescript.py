@@ -14,10 +14,7 @@ and carried over (see CLAUDE.md, "LiveCodeScript / LCB / OXT gotchas"):
      error; a stray or missing `end unsafe` mis-scopes every foreign call.
   3. constant-declared-before-use         - OXT resolves a constant by lexical
      position; a forward reference silently evaluates to nothing.
-  4. the constant declaration FORM         - livecodescript uses `constant k = v`,
-     LCB uses `constant k is v`; the wrong form is a compile error that kills
-     the whole file (paid for on-engine in the CoinXT test harness).
-  5. the prefixed-token-shadow trap        - a t/p/s/k-prefixed name whose full
+  4. the prefixed-token-shadow trap        - a t/p/s/k-prefixed name whose full
      spelling lowercases to a reserved token (the classic `tExt` == `text`)
      compiles and silently misbehaves.
 
@@ -225,10 +222,7 @@ def check_balance(path, stripped_lines, is_script, problems):
 def check_constants_before_use(path, stripped_lines, problems):
     decl_line = {}
     for lineno, sline in enumerate(stripped_lines, start=1):
-        # both declaration forms: `constant kX is ...` (LCB) and
-        # `constant kX = ...` (livecodescript); the form itself is policed by
-        # check_constant_form, but the before-use rule applies to either
-        m = re.match(r"\s*constant\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|is\b)", sline)
+        m = re.match(r"\s*constant\s+([A-Za-z_][A-Za-z0-9_]*)\s+is\b", sline)
         if m:
             name = m.group(1)
             decl_line.setdefault(name, lineno)
@@ -241,29 +235,6 @@ def check_constants_before_use(path, stripped_lines, problems):
                 problems.append(Problem(
                     path, lineno,
                     f"constant `{name}` used before its declaration on line {dline}"))
-
-
-def check_constant_form(path, stripped_lines, is_script, problems):
-    """The two languages DECLARE a constant differently, and the wrong form is
-    a compile error that kills the whole file: livecodescript uses
-    `constant kName = <value>`; LCB uses `constant kName is <value>`. Paid for
-    on-engine (the CoinXT test harness failed at its first constant), so catch
-    it statically per file type."""
-    for lineno, sline in enumerate(stripped_lines, start=1):
-        is_form = re.match(r"\s*constant\s+[A-Za-z_][A-Za-z0-9_]*\s+is\b", sline)
-        eq_form = re.match(r"\s*constant\s+[A-Za-z_][A-Za-z0-9_]*\s*=", sline)
-        if is_script and is_form:
-            problems.append(Problem(
-                path, lineno,
-                "livecodescript declares a constant with `=` "
-                "(`constant kName = ...`); the `is` form is LCB-only and "
-                "fails to compile on-engine"))
-        if (not is_script) and eq_form:
-            problems.append(Problem(
-                path, lineno,
-                "LCB declares a constant with `is` "
-                "(`constant kName is ...`); the `=` form is "
-                "livecodescript-only and fails to compile"))
 
 
 def check_shadow_trap(path, stripped_lines, problems):
@@ -350,7 +321,6 @@ def check_file(path, problems):
     check_banned_chars(path, raw_lines, problems)
     check_balance(path, stripped_lines, is_script, problems)
     check_constants_before_use(path, stripped_lines, problems)
-    check_constant_form(path, stripped_lines, is_script, problems)
     check_shadow_trap(path, stripped_lines, problems)
     check_put_prepositions(path, stripped_lines, problems)
     if not is_script:

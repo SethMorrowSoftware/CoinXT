@@ -30,39 +30,12 @@ It **is**:
 
 It is **NOT**:
 - A key manager or a wallet UI. The app owns key storage, backup, and the confirm-before-sign UX.
+- A network layer. CoinXT never touches a peer, a node, or an RPC endpoint. It produces signed bytes;
+  the app broadcasts them (optionally over Tor via OnionXT, doc-level composition only).
 - A source of consensus truth. It does not validate a chain, a UTXO set, or a nonce. It signs what it is
   told to sign; the app is responsible for constructing the correct sighash / transaction.
 - New cryptography. Every curve op and hash is trezor-crypto's; CoinXT adds no cipher of its own (the
   same rule SodiumXT and OnionXT hold).
-
-The **core** (`src/coinxt.livecodescript` + the shim) is NOT a network layer: it never touches a peer, a
-node, or an RPC endpoint, holds no key beyond one call, and is a pure function of its inputs. That is the
-security boundary and it does not move.
-
-### 1.1 The optional online layer (`cxo*`, a SEPARATE opt-in module)
-
-`src/coinxt-online.livecodescript` is an OPTIONAL companion the app loads deliberately (`start using` it,
-exactly as it opts into SodiumXT). It composes the ENGINE's HTTP (and, if the app routes through OnionXT,
-Tor) to do the two things a pure signer cannot: READ chain state (an address's UTXOs, its balance, a fee
-rate) and WRITE an already-signed transaction to the network. It is `cxo`-prefixed and lives in its own
-file so the offline core stays auditably network-free and key-free; the core never gains a network call.
-
-The rules that keep this honest, and MUST hold:
-
-- **It never touches a private key.** It fetches read-only data and broadcasts bytes the offline core
-  already signed. Signing stays in the core, behind confirm-before-sign.
-- **An explorer's answer is UNTRUSTED input.** A queried server can lie about balances, UTXOs, or fees.
-  So a response is parsed FAIL-CLOSED (a malformed body is a clean `"CoinXT: ..."` error, never a
-  guessed value), and the human still confirms every amount and destination before the core signs. A
-  parser bug can feed a wrong amount to the tx builder, never forge a signature; the on-screen fee is
-  the backstop.
-- **Querying leaks your addresses.** Asking a public explorer about your address tells that server the
-  address is yours, and broadcasting reveals your IP. This is a PRIVACY cost, documented loudly. The
-  endpoint is configurable so the app can point at ITS OWN node or a Tor hidden service (the OnionXT
-  composition), which is the private way to use it.
-- **Determinism holds where it can.** The response PARSERS are pure functions, transcribed to Python and
-  vector-locked in `tools/coin-kat.py` against representative Esplora-shape fixtures (documented as
-  schema fixtures, not a captured live response); only the thin HTTP verb itself needs an on-engine pass.
 
 ## 2. Why trezor-crypto, and the license
 
@@ -117,15 +90,9 @@ it internally:
   `sxRandomBytes`** (compose it), exactly as OnionXT derives onion keys from a SodiumXT seed. An app
   without SodiumXT passes OS entropy it obtained itself.
 
-This means: no output-affecting RNG in the shim to get wrong, no non-reproducible outputs, and the whole
-surface is pinned by vectors in `tools/coin-kat.py`. It also keeps the trust story honest: CoinXT never
-invents the randomness your keys depend on; you hand it in and can audit where it came from.
-
-One as-built caveat (see [CLAUDE.md](CLAUDE.md), "Determinism and entropy"): trezor-crypto itself calls
-its integrator RNG hook on every curve operation for SIDE-CHANNEL BLINDING (randomized Jacobian
-coordinates, nonce splitting). CoinXT feeds that hook from the OS CSPRNG. That randomness never reaches
-an output, so determinism holds exactly as stated; it only randomizes the internal compute path, and no
-key material ever comes from it.
+This means: no ambient RNG in the shim to get wrong, no non-reproducible outputs, and the whole surface
+is pinned by vectors in `tools/coin-kat.py`. It also keeps the trust story honest: CoinXT never invents
+the randomness your keys depend on; you hand it in and can audit where it came from.
 
 ## 5. The C ABI contract (`cnx_`)
 
@@ -168,10 +135,9 @@ Curve (secp256k1):
   cnx_ecdsa_sign_recoverable(sk32, hash32, out_sig65) -> int        // Ethereum: 64 + recid
   cnx_ecdsa_recover(sig65, hash32, out_pub65) -> int                // ecrecover
   cnx_ecdh(sk32, pub, out32) -> int
-  cnx_schnorr_sign(sk32, msg32, aux32, out_sig64) -> int            // BIP-340 (aux optional)
+  cnx_schnorr_sign(sk32, msg32, aux32, out_sig64) -> int            // BIP-340
   cnx_schnorr_verify(xonly_pub32, msg32, sig64) -> int
-  cnx_xonly_from_seckey(sk32, out32) -> int                         // BIP-340 x-only pubkey
-  cnx_taproot_tweak_pubkey(xonly_internal32, out32) -> int          // BIP-341 key-path output key
+  cnx_xonly_from_seckey(sk32, out32, out_parity) -> int             // BIP-340 / Taproot
 
 Hashes:
   cnx_sha256(in, len, out32) / cnx_sha512(in, len, out64)
@@ -189,13 +155,9 @@ HD (BIP-32) - the node is a fixed-size opaque byte blob (version||depth||fingerp
   cnx_hdnode_public_key(node, out33) -> int
   cnx_hdnode_chaincode(node, out32) -> int
 
-Mnemonic (BIP-39): entirely in script, no dedicated native call. entropy<->words
-  and the checksum word are pure bytes + a cnx_sha256 call; mnemonic -> seed is
-  cnx_pbkdf2_hmac_sha512 (2048 iters, salt "mnemonic"+passphrase, 64 bytes).
-
-Hygiene:
-  cnx_wipe(buf, len) -> int      // memzero an engine-allocated out-buffer that carried a
-                                 // secret, BEFORE the LCB layer deallocates it
+Mnemonic (BIP-39):
+  cnx_bip39_seed(mnemonic, mlen, passphrase, plen, out64) -> int    // PBKDF2-HMAC-SHA512, 2048 iters
+  // entropy<->words and the checksum word live in script (pure bytes + a SHA-256 call)
 ```
 
 That is the entire native surface: roughly 25 functions, all buffer-in / buffer-out, all deterministic.
@@ -238,42 +200,14 @@ Encodings (PURE SCRIPT, pinned by KAT):
   cxHexEncode / cxHexDecode
   cxBase58CheckEncode(pVersion, pPayload) / cxBase58CheckDecode(pString)   (fails closed on bad checksum)
   cxBech32Encode(pHrp, pWitVer, pProgram) / cxBech32Decode(pString)        (Bech32 and Bech32m)
-  cxWifEncode(pSeckey, pCompressed, pMainnet) / cxWifDecode(pWif)          (WIF private-key form)
-  cxRlpBytes(pData) / cxRlpList(pPayload)                                  [Ethereum tx; COMPOSABLE:
-  cxRlpUIntBytes(pBytes) / cxRlpUIntDec(pDecimalString)                     encode items, concatenate,
-                                                                            wrap; decode deferred]
+  cxRlpEncode(pList) / cxRlpDecode(pBytes)                                 [Ethereum tx]
 
 Addresses (compose the above):
   cxBtcAddressP2PKH(pPubkey, pMainnet)    -> Base58Check(0x00 || hash160(pubkey))
-  cxBtcAddressP2SH_P2WPKH(pPubkey, pMainnet) -> Base58Check(0x05 || hash160(0x0014 || hash160(pub33)))
   cxBtcAddressP2WPKH(pPubkey, pMainnet)   -> Bech32("bc", 0, hash160(pubkey))
   cxBtcAddressP2TR(pXonly, pMainnet)      -> Bech32m("bc", 1, xonly)
   cxEthAddress(pPubkey)                   -> "0x" + EIP-55( keccak256(pub65[2..65])[13..32] )
   cxEthAddressChecksum(pAddress)          -> EIP-55 mixed-case form; verify on input
-  cxEthPersonalHash(pMessage)             -> keccak256 of the EIP-191 prefixed message [personal_sign]
-
-Bitcoin transactions (the BIP-143 P2WPKH layer; the CALLER shows the fields + fee to a human first):
-  cxSigToDer(pSig64)                      -> strict-DER (BIP-66) form of a raw r||s signature
-  cxAddressToScript(pAddress)             -> scriptPubKey for any decodable address (fail closed)
-  cxBtcTxSignP2WPKH(pSeckey, pTxid, pVout, pAmountSats, pOutputs, pNested, pVersion, pSequence,
-                    pLocktime)            -> txid & LF & sighash & LF & raw signed tx (one SegWit
-                                             input, native or BIP-49 nested; SIGHASH_ALL)
-
-PSBT (BIP-174, the cold-signer surface; single-key SegWit inputs sign, everything decodes):
-  cxPsbtDecode(pPsbt)                     -> human-readable intent report (inputs, outputs, fee)
-  cxPsbtSign(pPsbt, pKey)                 -> updated PSBT base64; pKey = 32-byte seckey (matched by
-                                             pubkey hash) or 73-byte HD node (walks the PSBT's own
-                                             BIP32_DERIVATION paths); untouched inputs stay byte-exact
-  cxPsbtFinalize(pPsbt)                   -> txid & LF & extracted network tx (single-key inputs)
-
-EIP-712 typed structured data (COMPOSABLE: a nested struct's hash is its parent's word):
-  cxEip712TypeHash(pTypeString) / cxEip712HashStruct(pTypeString, pWords)
-  cxEip712WordUInt(pDec) / cxEip712WordAddress(p0x) / cxEip712WordHash(pData)
-  cxEip712Digest(pDomainSeparator, pStructHash)   -> sign with cxSignRecoverable (v = recid + 27)
-
-BIP-322 generic signed messages (the "simple" P2WPKH form):
-  cxBip322Hash(pMessage) / cxBip322Sign(pSeckey, pMessage) -> base64 proof
-  cxBip322Verify(pAddress, pMessage, pSigB64)              -> boolean, fail closed
 ```
 
 ## 7. Formats CoinXT must get byte-exact (the spec inside the spec)
