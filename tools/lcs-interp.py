@@ -32,7 +32,61 @@ exact under both - and that is precisely why it does not.
 It is deliberately literal and slow (cxBitXor alone is 31 interpreted iterations
 per call, and a bech32 checksum calls it hundreds of times). Speed is not the
 point; running the real text is.
+
+EXTENDED 2026-08-23 FOR THE NOSTRXT PORT (nostrxt/docs/08-open-questions.md
+question 9; the copy in nostrxt/tools/ is byte-identical and drift-gated).
+The additions are exactly what nostrxt/src/nostrxt.livecodescript uses beyond
+coinxt's subset, measured rather than guessed: command/on handler definitions
+and statement-position handler calls; `exit <handler>`; chained array
+subscripts (read and write, any depth); `the keys of` and
+`is [not] among the keys of`; `repeat for each item`; the lineDelimiter as
+modelled state beside the itemDelimiter, with `line` chunks and
+`sort lines of`; the operators `contains` / `begins with` / `ends with` /
+`is [not] an integer` / `is [not] a number`; textEncode/textDecode with a real
+UTF-8 encoding; and base64Encode/base64Decode. Everything outside the union is
+still refused loudly.
+
+THE NAMED DIVERGENCES GREW WITH IT, same contract as the `is` note above
+(stricter-than-engine is acceptable and documented; looser is a bug):
+  - `contains` / `begins with` / `ends with` are modelled CASE-SENSITIVELY,
+    like `is`. The engine folds case on all three unless `the caseSensitive`
+    is set. Stricter, same reasoning as _eq.
+  - `is an integer` / `is a number` model the ENGINE's coercion faithfully
+    ("1e3" IS an integer to the engine - docs/OXT-ENGINE-NOTES and nostrxt's
+    own gotcha 4), because the shipped script GUARDS against that fold with
+    digit-run checks and a stricter model here would test the guard against a
+    world where the hazard does not exist.
+  - `the keys of` returns keys in INSERTION order, one per line. The engine
+    documents no order at all, so any script that needs one must sort - the
+    shipped files do (`sort lines of`) - and a script that silently relied on
+    an order would pass here and misbehave on an engine. Stricter would be
+    randomising; insertion order plus the sort discipline is enough for the
+    corpus this runs.
+  - `sort lines of` sorts case-insensitively (the engine default), ASCII only.
+  - base64Encode wraps its output with a line break every 72 characters. The
+    real engine wraps too, at a width nobody has measured on OXT
+    (nostrxt/docs/08 question 1); the shipped callers strip ALL whitespace, so
+    any positive wrap width exercises them and the width itself cannot matter
+    to a caller that survives this model.
+  - textDecode with "utf-8" replaces invalid sequences (U+FFFD) rather than
+    throwing, so an encode-decode round trip DIFFERS on invalid input - which
+    is exactly the validity probe the shipped NIP-44 unpad performs.
+  - AN ARRAY OPERAND OF `is` IS COMPARED AS AN ARRAY, not folded to a
+    string: a populated array `is empty` answers FALSE, an array with no
+    keys answers TRUE against empty, and two arrays compare by content.
+    This is modelled from the TREE'S OWN ENGINE EVIDENCE, not from engine
+    folklore: riptide's engine-proven identity path (`put rsIdentityKeys(...)
+    into tKeys` / `if tKeys is empty then return empty`) uses exactly this
+    refusal discriminator and passed on two machines, which is only possible
+    if a populated array is NOT empty to `is`. (A first draft of this
+    extension modelled the classic array-folds-to-empty rule instead, and
+    driving the unmodified nostrxt script immediately "found" a dead
+    validation block - reproduce-before-fix then checked the model against
+    the engine-proven corpus and the MODEL was the bug. Suspect the probe
+    first.) _disp still refuses to stringify an array in every string
+    context (concatenation, chunks, contains) - the coinxt lesson stands.
 """
+import base64
 import re
 
 
@@ -75,6 +129,14 @@ class Interp:
     def __init__(self, src):
         self.constants = {}
         self.handlers = {}
+        # SCRIPT-LEVEL `local` declarations: file-scope state shared by every
+        # handler (an error slot, a capability cache). Modelled as visible
+        # file-wide; the engine actually resolves script-level names by
+        # LEXICAL POSITION (the suite's 106-declaration fold lesson), which
+        # is not modelled here because the corpus declares its script-locals
+        # at the top of the file, where the two rules agree - the family
+        # checker and the fold machinery are what hold that discipline.
+        self.globals = {}
         self._parse(src)
 
     # ---------------------------------------------------------------- parsing
@@ -110,7 +172,13 @@ class Interp:
                 self.constants[m.group(1)] = self.eval_expr(m.group(2), {})
                 i += 1
                 continue
-            m = re.match(r'(?:private\s+)?function\s+(\w+)\s*(.*)$', ln)
+            m = re.match(r'local\s+(.+)$', ln)
+            if m:
+                for v in m.group(1).split(","):
+                    self.globals.setdefault(v.strip().lower(), "")
+                i += 1
+                continue
+            m = re.match(r'(?:private\s+)?(?:function|command|on)\s+(\w+)\s*(.*)$', ln)
             if m:
                 name, params = m.group(1), m.group(2)
                 plist = [p.strip() for p in params.split(",") if p.strip()]
@@ -282,6 +350,42 @@ class Interp:
                 except _Exit:
                     break
             return after
+        # `repeat forever` - always paired with an `exit repeat` in the corpus;
+        # the same runaway guard as `repeat while`, because an interpreter
+        # that can hang is an interpreter whose failures nobody reads.
+        if low == "repeat forever":
+            inner, after = self._block(body, i, None, None)
+            guard = 0
+            while True:
+                guard += 1
+                if guard > 2_000_000:
+                    raise RuntimeError("repeat forever did not terminate")
+                try:
+                    self._exec(inner, env)
+                except _Next:
+                    pass
+                except _Exit:
+                    break
+            return after
+        # `repeat for each item VAR in EXPR` - the one for-each form the corpus
+        # uses. The engine iterates a SNAPSHOT of the container, so the list is
+        # materialised before the first pass and a mutation inside the loop
+        # cannot change the iteration.
+        m = re.match(r'repeat\s+for\s+each\s+item\s+(\w+)\s+in\s+(.+)$', line, re.I)
+        if m:
+            var, src_expr = m.group(1).lower(), m.group(2)
+            inner, after = self._block(body, i, None, None)
+            items = _split_chunks(str(_disp(self.eval_expr(src_expr, env))),
+                                  ITEM_DELIMITER[0])
+            for it in items:
+                env[var] = it
+                try:
+                    self._exec(inner, env)
+                except _Next:
+                    pass
+                except _Exit:
+                    break
+            return after
 
         # --- simple statements
         if low.startswith("local "):
@@ -318,6 +422,22 @@ class Interp:
         if m:
             ITEM_DELIMITER[0] = str(_disp(self.eval_expr(m.group(1), env)))
             return i + 1
+        m = re.match(r'set\s+the\s+lineDelimiter\s+to\s+(.+)$', line, re.I)
+        if m:
+            LINE_DELIMITER[0] = str(_disp(self.eval_expr(m.group(1), env)))
+            return i + 1
+        # `sort lines of VAR` - ascending, case-insensitive (the engine
+        # default), which is all the corpus asks of it (canonicalising a key
+        # list before iteration). International collation is NOT modelled;
+        # every sorted list in the corpus is ASCII.
+        m = re.match(r'sort\s+lines\s+of\s+(\w+)$', line, re.I)
+        if m:
+            tgt = m.group(1)
+            s = str(_disp(self.eval_expr(tgt, env)))
+            parts = _split_chunks(s, LINE_DELIMITER[0])
+            parts.sort(key=lambda x: x.lower())
+            self.assign(tgt, LINE_DELIMITER[0].join(parts), env)
+            return i + 1
         m = re.match(r'get\s+(.+)$', line, re.I)
         if m:
             # `get EXPR` evaluates EXPR and puts the value in `it`. The script
@@ -349,17 +469,81 @@ class Interp:
                 cur = "" if cur == "" else str(cur)
                 self.assign(tgt, (cur + str(v)) if prep == "after" else (str(v) + cur), env)
             return i + 1
+        # `exit <handlerName>` - return-with-no-value from anywhere in the
+        # handler (the corpus uses it in command-shaped handlers). `exit
+        # repeat` was consumed above, so any exit reaching here names a
+        # handler; the name is not checked against the enclosing one because
+        # the checker already enforces that pairing statically.
+        m = re.match(r'exit\s+(\w+)$', line, re.I)
+        if m and m.group(1).lower() != "repeat":
+            raise _Return("")
+        # A statement-position HANDLER CALL (`nxSetError "..."`, or bare with
+        # no arguments - the zero-arg form must be bare, which the family
+        # checker enforces; the parenthesised spelling is the engine trap this
+        # interpreter must not quietly accept either, and does not: it would
+        # arrive here as a call whose one argument is `()` and fail to parse).
+        m = re.match(r'([A-Za-z_]\w*)\s*(.*)$', line)
+        if m and m.group(1).lower() in self.handlers:
+            args = []
+            rest = m.group(2).strip()
+            if rest:
+                p = _Expr(self, env)
+                p.s, p.i = rest, 0
+                while True:
+                    args.append(p.p_or())
+                    p.ws()
+                    if p.i < len(p.s) and p.s[p.i] == ",":
+                        p.i += 1
+                        continue
+                    break
+                if p.i < len(p.s):
+                    raise SyntaxError(f"trailing input in call {line!r}")
+            self.call(m.group(1), args)
+            return i + 1
         raise SyntaxError(f"unsupported statement: {line!r}")
 
     def assign(self, target, value, env):
-        m = re.match(r'^(\w+)\s*\[\s*(.+?)\s*\]$', target)
+        m = re.match(r'^(\w+)\s*\[', target)
         if m:
-            name, key = m.group(1).lower(), str(self.eval_expr(m.group(2), env))
-            if not isinstance(env.get(name), dict):
-                env[name] = {}
-            env[name][key] = _copy(value)
+            # A bracket CHAIN (`tTags[tI][tJ]`, any depth), each key itself a
+            # full expression, scanned with depth counting so a subscripted
+            # key (`tA[tB[1]]`) cannot split the chain in the wrong place.
+            name = m.group(1).lower()
+            keys, i = [], len(m.group(1))
+            while i < len(target) and target[i] in " \t":
+                i += 1
+            while i < len(target) and target[i] == "[":
+                depth, j = 1, i + 1
+                while j < len(target) and depth:
+                    if target[j] == "[":
+                        depth += 1
+                    elif target[j] == "]":
+                        depth -= 1
+                    j += 1
+                if depth:
+                    raise SyntaxError(f"unbalanced subscript in {target!r}")
+                keys.append(str(_disp(self.eval_expr(target[i + 1:j - 1], env))))
+                i = j
+                while i < len(target) and target[i] in " \t":
+                    i += 1
+            if i != len(target):
+                raise SyntaxError(f"cannot assign to {target!r}")
+            store = (self.globals if (name not in env and name in self.globals)
+                     else env)
+            if not isinstance(store.get(name), dict):
+                store[name] = {}
+            node = store[name]
+            for k in keys[:-1]:
+                if not isinstance(node.get(k), dict):
+                    node[k] = {}
+                node = node[k]
+            node[keys[-1]] = _copy(value)
             return
-        env[target.lower()] = _copy(value)
+        low = target.lower()
+        if low not in env and low in self.globals:
+            self.globals[low] = _copy(value)
+            return
+        env[low] = _copy(value)
 
     def truth(self, v):
         if isinstance(v, bool):
@@ -437,13 +621,43 @@ class _Expr:
         v = self.p_concat()
         while True:
             save = self.i
+            if self.kw("contains"):
+                r = self.p_concat()
+                v = str(_disp(r)) in str(_disp(v))
+                continue
+            if self.kw("begins"):
+                assert self.kw("with"), f"expected `with` in {self.s!r}"
+                r = self.p_concat()
+                v = str(_disp(v)).startswith(str(_disp(r)))
+                continue
+            if self.kw("ends"):
+                assert self.kw("with"), f"expected `with` in {self.s!r}"
+                r = self.p_concat()
+                v = str(_disp(v)).endswith(str(_disp(r)))
+                continue
             if self.kw("is"):
-                if self.kw("not"):
-                    r = self.p_concat()
-                    v = not _eq(v, r)
-                else:
-                    r = self.p_concat()
-                    v = _eq(v, r)
+                neg = bool(self.kw("not"))
+                if self.kw("among"):
+                    assert self.kw("the") and self.kw("keys") and self.kw("of"), \
+                        f"expected `the keys of` in {self.s!r}"
+                    target = self.p_concat()
+                    hit = isinstance(target, dict) and str(_disp(v)) in target
+                    v = (not hit) if neg else hit
+                    continue
+                save2 = self.i
+                if self.kw("an", "a"):
+                    word = self.kw("integer", "number", "array")
+                    if word == "array":
+                        hit = isinstance(v, dict)
+                        v = (not hit) if neg else hit
+                        continue
+                    if word:
+                        hit = _is_numeric(v, word == "integer")
+                        v = (not hit) if neg else hit
+                        continue
+                    self.i = save2
+                r = self.p_concat()
+                v = (not _eq(v, r)) if neg else _eq(v, r)
                 continue
             self.ws()
             for op in (">=", "<=", "<>", ">", "<"):
@@ -527,6 +741,21 @@ class _Expr:
         if self.kw("the"):
             if self.kw("itemdelimiter"):
                 return ITEM_DELIMITER[0]
+            if self.kw("linedelimiter"):
+                return LINE_DELIMITER[0]
+            if self.kw("seconds"):
+                # deterministic tooling: a fixed epoch a driver may set, never
+                # the wall clock (a gate that reads real time is a gate whose
+                # failures cannot be reproduced).
+                return SECONDS[0]
+            if self.kw("keys"):
+                # `the keys of EXPR`: one key per line, INSERTION order (the
+                # engine documents no order; see the named divergences above).
+                assert self.kw("of"), f"expected `of` in {self.s!r}"
+                target = self.p_concat()
+                if not isinstance(target, dict):
+                    return ""
+                return "\n".join(target.keys())
             if self.kw("number"):
                 assert self.kw("of")
                 unit = self.kw("bytes", "chars", "characters", "items", "lines")
@@ -539,10 +768,11 @@ class _Expr:
                     return len(s)
                 if unit == "items":
                     return len(_split_chunks(s, ITEM_DELIMITER[0]))
-                return len(_split_chunks(s, "\n"))
+                return len(_split_chunks(s, LINE_DELIMITER[0]))
             raise SyntaxError(f"unsupported `the` expression in {self.s!r}")
-        # chunk expressions: byte/char/item N [to M] of EXPR
-        unit = self.kw("byte", "bytes", "char", "chars", "character", "item", "items")
+        # chunk expressions: byte/char/item/line N [to M] of EXPR
+        unit = self.kw("byte", "bytes", "char", "chars", "character", "item",
+                       "items", "line", "lines")
         if unit:
             a = self.p_add()
             b = None
@@ -564,17 +794,28 @@ class _Expr:
             return ""
         # The named literals for characters that cannot be written inside a
         # quoted string without ambiguity.
-        if low in ("comma", "space", "tab", "quote"):
-            return {"comma": ",", "space": " ", "tab": "\t", "quote": '"'}[low]
+        if low in ("comma", "space", "tab", "quote", "return", "cr", "lf",
+                   "linefeed", "crlf"):
+            # `return`/`cr`/`lf`/`linefeed` are all LINEFEED in LiveCodeScript
+            # (the engine's cr has been 0x0A since classic MacOS days ended);
+            # crlf is the two-byte network form.
+            return {"comma": ",", "space": " ", "tab": "\t", "quote": '"',
+                    "return": "\n", "cr": "\n", "lf": "\n",
+                    "linefeed": "\n", "crlf": "\r\n"}[low]
         self.ws()
         if self.i < len(self.s) and self.s[self.i] == "[":
-            self.i += 1
-            key = str(_disp(self.p_or()))
-            self.ws()
-            assert self.s[self.i] == "]"
-            self.i += 1
-            v = self.env.get(low, {})
-            return v.get(key, "") if isinstance(v, dict) else ""
+            # a bracket CHAIN: each step reads one key; a missing key or a
+            # non-array node answers empty, the engine's behaviour.
+            v = self.env.get(low, self.ip.globals.get(low, {}))
+            while self.i < len(self.s) and self.s[self.i] == "[":
+                self.i += 1
+                key = str(_disp(self.p_or()))
+                self.ws()
+                assert self.s[self.i] == "]"
+                self.i += 1
+                v = v.get(key, "") if isinstance(v, dict) else ""
+                self.ws()
+            return v
         if self.i < len(self.s) and self.s[self.i] == "(":
             self.i += 1
             args = []
@@ -594,6 +835,8 @@ class _Expr:
             return self.ip.constants[name]
         if low in self.env:
             return self.env[low]
+        if low in self.ip.globals:
+            return self.ip.globals[low]
         if low in self.ip.handlers:
             return _builtin_or_handler(self.ip, name, [])
         return ""
@@ -614,6 +857,11 @@ def _disp(v):
 
 
 def _eq(a, b):
+    if isinstance(a, dict) or isinstance(b, dict):
+        if isinstance(a, dict) and isinstance(b, dict):
+            return a == b
+        arr, other = (a, b) if isinstance(a, dict) else (b, a)
+        return len(arr) == 0 and str(_disp(other)) == ""
     if isinstance(a, bool) or isinstance(b, bool):
         return str(_disp(a)).lower() == str(_disp(b)).lower()
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
@@ -646,8 +894,8 @@ def _split_chunks(s, d):
 
 def _chunk(unit, a, b, target):
     s = str(_disp(target))
-    if unit.startswith("item"):
-        d = ITEM_DELIMITER[0]
+    if unit.startswith("item") or unit.startswith("line"):
+        d = ITEM_DELIMITER[0] if unit.startswith("item") else LINE_DELIMITER[0]
         parts = _split_chunks(s, d)
         if b is None:
             return parts[a - 1] if 1 <= a <= len(parts) else ""
@@ -657,6 +905,25 @@ def _chunk(unit, a, b, target):
     if a < 1:
         a = 1
     return s[a - 1:b]
+
+
+def _is_numeric(v, want_int):
+    """`is a number` / `is an integer`, modelled the ENGINE's way: the operand
+    is parsed as a number first, so "1e3" IS an integer here (see the named
+    divergences in the header - the shipped scripts guard against exactly this
+    fold with digit-run checks, and a stricter model would test those guards
+    against a world without the hazard)."""
+    try:
+        s = str(_disp(v)).strip()
+    except TypeError:
+        return False
+    if s == "":
+        return False
+    try:
+        f = float(s)
+    except ValueError:
+        return False
+    return f == int(f) if want_int else True
 
 
 HASHES = {}
@@ -676,6 +943,15 @@ HASHES = {}
 # could be verified headlessly, only asserted.
 # ---------------------------------------------------------------------------
 ITEM_DELIMITER = [","]
+
+# The lineDelimiter, the same modelled-global-state story as the item
+# delimiter above: the corpus saves, sets, uses and restores it around every
+# line-shaped parse, and modelling it is what lets a gate prove that
+# discipline rather than assume it.
+LINE_DELIMITER = ["\n"]
+
+# `the seconds`, as a settable constant (see the note at its read site).
+SECONDS = [1700000000]
 
 
 def set_item_delimiter(ch):
@@ -701,7 +977,33 @@ def _builtin_or_handler(ip, name, args):
     if low == "trunc":
         return int(_n(args[0]))
     if low == "textencode":
+        # 1-arg / non-UTF-8 stays the identity the coinxt vectors use (ASCII);
+        # "utf-8"/"utf8" performs the real encoding, TEXT code points in to a
+        # 0..255 byte string out - the model the Bytes docstring above states.
+        enc = str(_disp(args[1])).lower() if len(args) > 1 else ""
+        if enc in ("utf-8", "utf8"):
+            return str(_disp(args[0])).encode("utf-8").decode("latin-1")
         return str(_disp(args[0]))          # ASCII only in our vectors
+    if low == "textdecode":
+        enc = str(_disp(args[1])).lower() if len(args) > 1 else ""
+        if enc in ("utf-8", "utf8"):
+            # invalid sequences become U+FFFD rather than raising - the
+            # documented divergence that makes the shipped encode-decode
+            # round-trip validity probe behave the way it was designed to.
+            return str(_disp(args[0])).encode("latin-1").decode("utf-8", errors="replace")
+        return str(_disp(args[0]))
+    if low == "base64encode":
+        raw = str(_disp(args[0])).encode("latin-1")
+        enc = base64.b64encode(raw).decode("ascii")
+        # the engine wraps; the width is a modelled guess (header note) that
+        # any whitespace-stripping caller is indifferent to.
+        return "\n".join(enc[k:k + 72] for k in range(0, len(enc), 72))
+    if low == "base64decode":
+        txt = re.sub(r"\s+", "", str(_disp(args[0])))
+        try:
+            return base64.b64decode(txt.encode("ascii"), validate=False).decode("latin-1")
+        except Exception:
+            return ""
     if low == "offset":
         hay, nee = str(_disp(args[1])), str(_disp(args[0]))
         return hay.find(nee) + 1
